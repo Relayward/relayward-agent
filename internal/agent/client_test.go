@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +24,9 @@ import (
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
 	"github.com/Relayward/relayward-sdk/protocol"
 
+	commandstate "github.com/Relayward/relayward-agent/internal/command"
 	"github.com/Relayward/relayward-agent/internal/config"
+	"github.com/Relayward/relayward-agent/internal/identity"
 )
 
 const (
@@ -151,6 +154,146 @@ func TestClientRegistrationAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestClientReplaysUnacknowledgedCommandResultAfterReconnect(t *testing.T) {
+	now := time.Now().UTC()
+	command := agentv1.Command{
+		Kind: "agent.test", IssuedAt: now, ExpiresAt: now.Add(time.Hour), Payload: json.RawMessage(`{"value":1}`),
+	}
+	commandEnvelope, err := agentv1.NewCommandEnvelope("command-1", command)
+	if err != nil {
+		t.Fatalf("NewCommandEnvelope() error = %v", err)
+	}
+	digest, _ := agentv1.CommandDigest(command)
+	var connections atomic.Int32
+	var executions atomic.Int32
+	firstResults := make(chan protocol.Envelope, 1)
+	ackSent := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer connection.Close()
+		attempt := connections.Add(1)
+		if _, err := readEnvelope(connection); err != nil {
+			t.Errorf("read Agent hello: %v", err)
+			return
+		}
+		centerHello, _ := agentv1.NewEnvelope(agentv1.MessageCenterHello, agentv1.CenterHello{
+			SessionID:                "0123456789abcdef0123456789abcde" + string(rune('0'+attempt)),
+			HeartbeatIntervalSeconds: int(agentv1.MinimumHeartbeatInterval.Seconds()), ServerTime: time.Now().UTC(),
+		})
+		if err := writeEnvelope(connection, centerHello); err != nil {
+			t.Errorf("write center hello: %v", err)
+			return
+		}
+		if attempt == 1 {
+			heartbeat, err := readEnvelope(connection)
+			if err != nil || heartbeat.Type != agentv1.MessageAgentHeartbeat {
+				t.Errorf("read first heartbeat: %+v, %v", heartbeat, err)
+				return
+			}
+			ack, _ := agentv1.NewEnvelope(agentv1.MessageCenterHeartbeatAck, agentv1.HeartbeatAck{
+				MessageID: heartbeat.ID, ServerTime: time.Now().UTC(), Command: &commandEnvelope,
+			})
+			ack.CorrelationID = heartbeat.ID
+			if err := writeEnvelope(connection, ack); err != nil {
+				t.Errorf("write heartbeat acknowledgement: %v", err)
+				return
+			}
+			firstResult, err := readEnvelope(connection)
+			if err != nil || firstResult.Type != agentv1.MessageAgentCommandResult {
+				t.Errorf("read first command result: %+v, %v", firstResult, err)
+				return
+			}
+			firstResults <- firstResult
+			return
+		}
+
+		replayed, err := readEnvelope(connection)
+		if err != nil || replayed.Type != agentv1.MessageAgentCommandResult {
+			t.Errorf("read replayed command result: %+v, %v", replayed, err)
+			return
+		}
+		firstResult := <-firstResults
+		firstPayload, firstErr := agentv1.DecodeEnvelopePayload[agentv1.CommandResult](firstResult)
+		replayedPayload, replayErr := agentv1.DecodeEnvelopePayload[agentv1.CommandResult](replayed)
+		if firstErr != nil || replayErr != nil || firstResult.ID == replayed.ID || firstPayload.CommandID != replayedPayload.CommandID || firstPayload.RequestSHA256 != replayedPayload.RequestSHA256 || firstPayload.Status != replayedPayload.Status {
+			t.Errorf("replayed result mismatch: first=%+v replayed=%+v errors=%v/%v", firstResult, replayed, firstErr, replayErr)
+			return
+		}
+		ack, _ := agentv1.NewCommandResultAckEnvelope(replayed.ID, agentv1.CommandResultAck{
+			CommandID: "command-1", RequestSHA256: digest, ServerTime: time.Now().UTC(),
+		})
+		if err := writeEnvelope(connection, ack); err != nil {
+			t.Errorf("write command result acknowledgement: %v", err)
+			return
+		}
+		close(ackSent)
+		for {
+			if _, err := readEnvelope(connection); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	client, err := newClient(config.Config{
+		ServerURL: server.URL, StateDirectory: filepath.Join(t.TempDir(), "state"), AllowInsecure: true,
+	}, "0.1.0", nil, commandstate.ExecutorFunc(func(_ context.Context, commandID string, _ agentv1.Command) (json.RawMessage, *protocol.Problem) {
+		executions.Add(1)
+		return json.RawMessage(`{"command_id":"` + commandID + `"}`), nil
+	}))
+	if err != nil {
+		t.Fatalf("newClient() error = %v", err)
+	}
+	processorContext, stopProcessor := context.WithCancel(context.Background())
+	processorDone := make(chan error, 1)
+	go func() { processorDone <- client.commands.Run(processorContext) }()
+	identity := identityForTest()
+	if stable, err := client.runSession(context.Background(), identity); err == nil || !stable {
+		t.Fatalf("first runSession() stable = %v, error = %v", stable, err)
+	}
+	secondContext, stopSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := client.runSession(secondContext, identity)
+		secondDone <- err
+	}()
+	select {
+	case <-ackSent:
+	case <-time.After(time.Second):
+		t.Fatal("center did not acknowledge the replayed result")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, resultErr := client.commands.NextResult()
+		if errors.Is(resultErr, commandstate.ErrNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("result acknowledgement was not persisted: %v", resultErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stopSecond()
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second runSession() error = %v", err)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("executor calls = %d, want 1", executions.Load())
+	}
+	if _, err := client.commands.NextResult(); !errors.Is(err, commandstate.ErrNotFound) {
+		t.Fatalf("NextResult() after acknowledgement error = %v", err)
+	}
+	stopProcessor()
+	if err := <-processorDone; err != nil {
+		t.Fatalf("command processor error = %v", err)
+	}
+}
+
 func TestClientRejectsInvalidRegistrationResponses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusCreated)
@@ -190,6 +333,12 @@ func TestControlTLSConfigPin(t *testing.T) {
 
 func testTLSState(rawCertificate []byte) tls.ConnectionState {
 	return tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: rawCertificate}}}
+}
+
+func identityForTest() identity.Identity {
+	return identity.Identity{
+		APIVersion: agentv1.APIVersion, NodeID: testNodeID, NodeName: "Edge one", Credential: testNodeCredential,
+	}
 }
 
 func TestSafeControlFailureDoesNotExposeDetails(t *testing.T) {

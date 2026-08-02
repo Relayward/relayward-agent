@@ -1,4 +1,4 @@
-github.com/Relayward/relayward-sdk v0.0.0-20260802075134-4ce7a8a63d2d h1:C9E3srpOYfvIzdWsboMBNpbh69pWYrBGFqMkOG64j1c=
-github.com/Relayward/relayward-sdk v0.0.0-20260802075134-4ce7a8a63d2d/go.mod h1:i9cfCbYnR19g3+/WZNTOjwpDrtQCzWolPEzQfhLM7v8=
+github.com/Relayward/relayward-sdk v0.0.0-20260802082525-bb2cf0377a3f h1:DUIYKqNnGJzvn2BsFOUTTyw+I8rej1jHkH+zIDVmCJI=
+github.com/Relayward/relayward-sdk v0.0.0-20260802082525-bb2cf0377a3f/go.mod h1:i9cfCbYnR19g3+/WZNTOjwpDrtQCzWolPEzQfhLM7v8=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=

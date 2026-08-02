@@ -25,6 +25,7 @@ import (
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
 	"github.com/Relayward/relayward-sdk/protocol"
 
+	commandstate "github.com/Relayward/relayward-agent/internal/command"
 	"github.com/Relayward/relayward-agent/internal/config"
 	"github.com/Relayward/relayward-agent/internal/identity"
 )
@@ -36,12 +37,13 @@ const (
 	writeTimeout         = 10 * time.Second
 )
 
-var capabilities = []string{"control.heartbeat"}
+var capabilities = []string{agentv1.CapabilityControlCommands, agentv1.CapabilityControlHeartbeat}
 
 type Client struct {
 	config     config.Config
 	version    string
 	identities *identity.Store
+	commands   *commandstate.Processor
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
 	logger     *slog.Logger
@@ -50,6 +52,10 @@ type Client struct {
 }
 
 func NewClient(value config.Config, version string, logger *slog.Logger) (*Client, error) {
+	return newClient(value, version, logger, nil)
+}
+
+func newClient(value config.Config, version string, logger *slog.Logger, executor commandstate.Executor) (*Client, error) {
 	normalized, err := config.Normalize(value)
 	if err != nil {
 		return nil, err
@@ -61,11 +67,16 @@ func NewClient(value config.Config, version string, logger *slog.Logger) (*Clien
 	if err != nil {
 		return nil, err
 	}
+	commandStore, err := commandstate.OpenStore(normalized.StateDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("open command state: %w", err)
+	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig}
 	return &Client{
 		config:     normalized,
 		version:    version,
 		identities: identity.NewStore(normalized.StateDirectory),
+		commands:   commandstate.NewProcessor(commandStore, executor),
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   connectTimeout,
@@ -98,15 +109,37 @@ func (client *Client) Run(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("load Agent identity: %w", err)
 	}
+	processorContext, stopProcessor := context.WithCancel(ctx)
+	processorFailure := make(chan error, 1)
+	processorDone := make(chan struct{})
+	go func() {
+		defer close(processorDone)
+		if err := client.commands.Run(processorContext); err != nil {
+			processorFailure <- err
+			stopProcessor()
+		}
+	}()
+	defer func() {
+		stopProcessor()
+		<-processorDone
+	}()
 
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		stable, sessionErr := client.runSession(ctx, current)
+		stable, sessionErr := client.runSession(processorContext, current)
 		if ctx.Err() != nil {
 			return nil
+		}
+		select {
+		case err := <-processorFailure:
+			return fmt.Errorf("run command processor: %w", err)
+		default:
+		}
+		if errors.Is(sessionErr, commandstate.ErrConflict) {
+			return fmt.Errorf("command state conflict: %w", sessionErr)
 		}
 		if stable {
 			backoff = time.Second
@@ -118,6 +151,9 @@ func (client *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil
+		case err := <-processorFailure:
+			timer.Stop()
+			return fmt.Errorf("run command processor: %w", err)
 		case <-timer.C:
 		}
 		backoff *= 2
@@ -228,7 +264,35 @@ func (client *Client) runSession(ctx context.Context, current identity.Identity)
 	client.logger.Info("control session connected", "node_id", current.NodeID, "session_id", centerHello.SessionID)
 
 	stable := false
+	nextHeartbeat := client.now()
 	for {
+		result, resultErr := client.commands.NextResult()
+		switch {
+		case resultErr == nil:
+			if err := client.sendCommandResult(connection, result); err != nil {
+				if ctx.Err() != nil {
+					return stable, nil
+				}
+				return stable, err
+			}
+			continue
+		case errors.Is(resultErr, commandstate.ErrNotFound):
+		default:
+			return stable, resultErr
+		}
+		wait := nextHeartbeat.Sub(client.now())
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return stable, nil
+			case <-client.commands.Results():
+				timer.Stop()
+				continue
+			case <-timer.C:
+			}
+		}
 		heartbeat, err := agentv1.NewEnvelope(agentv1.MessageAgentHeartbeat, agentv1.Heartbeat{
 			SessionID: centerHello.SessionID, AgentVersion: client.version, ObservedAt: client.now(),
 		})
@@ -236,13 +300,22 @@ func (client *Client) runSession(ctx context.Context, current identity.Identity)
 			return stable, err
 		}
 		if err := writeEnvelope(connection, heartbeat); err != nil {
+			if ctx.Err() != nil {
+				return stable, nil
+			}
 			return stable, err
 		}
 		if err := connection.SetReadDeadline(client.now().Add(3 * period)); err != nil {
+			if ctx.Err() != nil {
+				return stable, nil
+			}
 			return stable, err
 		}
 		ackEnvelope, err := readEnvelope(connection)
 		if err != nil {
+			if ctx.Err() != nil {
+				return stable, nil
+			}
 			return stable, err
 		}
 		if ackEnvelope.Type == agentv1.MessageProtocolError {
@@ -255,15 +328,45 @@ func (client *Client) runSession(ctx context.Context, current identity.Identity)
 		if err != nil || ack.MessageID != heartbeat.ID {
 			return stable, errors.New("heartbeat acknowledgement does not match")
 		}
-		stable = true
-		timer := time.NewTimer(period)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return stable, nil
-		case <-timer.C:
+		if ack.Command != nil {
+			if err := client.commands.Accept(*ack.Command, client.now()); err != nil {
+				return stable, fmt.Errorf("persist center command: %w", err)
+			}
 		}
+		stable = true
+		nextHeartbeat = client.now().Add(period)
 	}
+}
+
+func (client *Client) sendCommandResult(connection *websocket.Conn, result agentv1.CommandResult) error {
+	envelope, err := agentv1.NewCommandResultEnvelope(result)
+	if err != nil {
+		return err
+	}
+	if err := writeEnvelope(connection, envelope); err != nil {
+		return err
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		return err
+	}
+	ackEnvelope, err := readEnvelope(connection)
+	if err != nil {
+		return err
+	}
+	if ackEnvelope.Type == agentv1.MessageProtocolError {
+		return protocolFailure(ackEnvelope)
+	}
+	if ackEnvelope.Type != agentv1.MessageCenterCommandResultAck || ackEnvelope.CorrelationID != envelope.ID {
+		return errors.New("command result acknowledgement does not match")
+	}
+	ack, err := agentv1.DecodeEnvelopePayload[agentv1.CommandResultAck](ackEnvelope)
+	if err != nil || ack.CommandID != result.CommandID || ack.RequestSHA256 != result.RequestSHA256 {
+		return errors.New("command result acknowledgement does not match")
+	}
+	if err := client.commands.Acknowledge(ack, client.now()); err != nil {
+		return fmt.Errorf("persist command result acknowledgement: %w", err)
+	}
+	return nil
 }
 
 func controlTLSConfig(pin string) (*tls.Config, error) {
