@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,9 @@ func TestClientRegistrationAndHeartbeat(t *testing.T) {
 		}
 		if registered.Token != testRegistrationToken || registered.OS != "linux" || registered.Arch != "amd64" {
 			t.Errorf("registration request = %+v", registered)
+		}
+		if !slices.Equal(registered.Capabilities, capabilities) {
+			t.Errorf("registration capabilities = %v, want %v", registered.Capabilities, capabilities)
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusCreated)
@@ -126,6 +130,8 @@ func TestClientRegistrationAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	updates := &recordingUpdateController{confirmed: make(chan string, 1)}
+	client.updates = updates
 	registered, err := client.Register(context.Background(), testRegistrationToken)
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -151,6 +157,14 @@ func TestClientRegistrationAndHeartbeat(t *testing.T) {
 	}
 	if strings.Contains(logOutput.String(), testRegistrationToken) || strings.Contains(logOutput.String(), testNodeCredential) {
 		t.Fatalf("logs contain a credential: %s", logOutput.String())
+	}
+	select {
+	case version := <-updates.confirmed:
+		if version != "0.1.0" {
+			t.Fatalf("confirmed update version = %q", version)
+		}
+	default:
+		t.Fatal("heartbeat acknowledgement did not confirm update health")
 	}
 }
 
@@ -242,9 +256,9 @@ func TestClientReplaysUnacknowledgedCommandResultAfterReconnect(t *testing.T) {
 
 	client, err := newClient(config.Config{
 		ServerURL: server.URL, StateDirectory: filepath.Join(t.TempDir(), "state"), AllowInsecure: true,
-	}, "0.1.0", nil, commandstate.ExecutorFunc(func(_ context.Context, commandID string, _ agentv1.Command) (json.RawMessage, *protocol.Problem) {
+	}, "0.1.0", nil, commandstate.ExecutorFunc(func(_ context.Context, commandID string, _ agentv1.Command) commandstate.Execution {
 		executions.Add(1)
-		return json.RawMessage(`{"command_id":"` + commandID + `"}`), nil
+		return commandstate.Execution{Output: json.RawMessage(`{"command_id":"` + commandID + `"}`)}
 	}))
 	if err != nil {
 		t.Fatalf("newClient() error = %v", err)
@@ -355,4 +369,17 @@ func TestSafeControlFailureDoesNotExposeDetails(t *testing.T) {
 	if got := protocolFailure(problem).Error(); got != "control protocol failure (unavailable)" {
 		t.Fatalf("protocolFailure() = %q", got)
 	}
+}
+
+type recordingUpdateController struct {
+	confirmed chan string
+}
+
+func (*recordingUpdateController) AwaitActivation(context.Context, string) error {
+	return nil
+}
+
+func (controller *recordingUpdateController) Confirm(version string) (bool, error) {
+	controller.confirmed <- version
+	return true, nil
 }

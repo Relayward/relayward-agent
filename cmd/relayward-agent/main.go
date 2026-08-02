@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,8 +15,11 @@ import (
 
 	"github.com/Relayward/relayward-agent/internal/agent"
 	"github.com/Relayward/relayward-agent/internal/buildinfo"
+	commandstate "github.com/Relayward/relayward-agent/internal/command"
 	"github.com/Relayward/relayward-agent/internal/config"
 )
+
+const restartExitCode = 75
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -29,6 +33,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	switch args[0] {
 	case "version":
+		if len(args) == 2 && args[1] == "--short" {
+			fmt.Fprintln(stdout, buildinfo.Version)
+			return 0
+		}
 		if len(args) != 1 {
 			printUsage(stderr)
 			return 2
@@ -53,7 +61,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func printUsage(writer io.Writer) {
-	fmt.Fprintln(writer, "usage: relayward-agent version")
+	fmt.Fprintln(writer, "usage: relayward-agent version [--short]")
 	fmt.Fprintln(writer, "       relayward-agent init-config --server-url URL [options]")
 	fmt.Fprintln(writer, "       relayward-agent enroll [-config PATH]")
 	fmt.Fprintln(writer, "       relayward-agent run [-config PATH]")
@@ -112,9 +120,16 @@ func runAgent(args []string, stderr io.Writer) int {
 	defer stop()
 	if err := client.Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "run Agent: %v\n", err)
-		return 1
+		return agentRunExitCode(err)
 	}
 	return 0
+}
+
+func agentRunExitCode(err error) int {
+	if errors.Is(err, commandstate.ErrRestartRequired) {
+		return restartExitCode
+	}
+	return 1
 }
 
 func loadClient(args []string, stderr io.Writer) (*agent.Client, int) {

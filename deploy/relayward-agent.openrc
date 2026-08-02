@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+# shellcheck disable=SC2034
+
+name="Relayward node agent"
+description="Relayward node agent"
+command="/usr/local/libexec/relayward-agent-launcher"
+command_user="relayward-agent:relayward-agent"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
+umask=0077
+no_new_privs=true
+output_logger="logger -t relayward-agent"
+error_logger="logger -t relayward-agent"
+
+depend() {
+	need net
+	after firewall
+}

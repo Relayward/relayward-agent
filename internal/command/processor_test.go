@@ -9,7 +9,6 @@ import (
 	"time"
 
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
-	"github.com/Relayward/relayward-sdk/protocol"
 )
 
 func TestProcessorExecutesDuplicateCommandOnceAndReplaysResult(t *testing.T) {
@@ -20,9 +19,9 @@ func TestProcessorExecutesDuplicateCommandOnceAndReplaysResult(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	var executions atomic.Int32
-	processor := NewProcessor(store, ExecutorFunc(func(_ context.Context, commandID string, value agentv1.Command) (json.RawMessage, *protocol.Problem) {
+	processor := NewProcessor(store, ExecutorFunc(func(_ context.Context, commandID string, value agentv1.Command) Execution {
 		executions.Add(1)
-		return json.RawMessage(`{"command_id":"` + commandID + `"}`), nil
+		return Execution{Output: json.RawMessage(`{"command_id":"` + commandID + `"}`)}
 	}))
 	processor.now = func() time.Time { return now.Add(time.Minute) }
 	envelope, err := agentv1.NewCommandEnvelope("command-1", testCommand(now))
@@ -95,9 +94,9 @@ func TestProcessorDoesNotExecuteExpiredCommand(t *testing.T) {
 	}
 	now := time.Date(2026, time.August, 2, 8, 0, 0, 0, time.UTC)
 	var executions atomic.Int32
-	processor := NewProcessor(store, ExecutorFunc(func(context.Context, string, agentv1.Command) (json.RawMessage, *protocol.Problem) {
+	processor := NewProcessor(store, ExecutorFunc(func(context.Context, string, agentv1.Command) Execution {
 		executions.Add(1)
-		return nil, nil
+		return Execution{}
 	}))
 	processor.now = func() time.Time { return now.Add(2 * time.Hour) }
 	envelope, _ := agentv1.NewCommandEnvelope("command-expired", testCommand(now))
@@ -122,5 +121,38 @@ func TestProcessorDoesNotExecuteExpiredCommand(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestProcessorLeavesRestartingCommandPending(t *testing.T) {
+	stateDirectory := t.TempDir()
+	store, err := OpenStore(stateDirectory)
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	now := time.Now().UTC()
+	processor := NewProcessor(store, ExecutorFunc(func(context.Context, string, agentv1.Command) Execution {
+		return Execution{Restart: true}
+	}))
+	processor.now = func() time.Time { return now }
+	envelope, err := agentv1.NewCommandEnvelope("command-restart", testCommand(now))
+	if err != nil {
+		t.Fatalf("NewCommandEnvelope() error = %v", err)
+	}
+	if err := processor.Accept(envelope, now); err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if err := processor.Run(context.Background()); !errors.Is(err, ErrRestartRequired) {
+		t.Fatalf("Run() restart error = %v", err)
+	}
+	if _, err := processor.NextResult(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("NextResult() after restart = %v", err)
+	}
+	reopened, err := OpenStore(stateDirectory)
+	if err != nil {
+		t.Fatalf("OpenStore() after restart error = %v", err)
+	}
+	if _, err := reopened.NextPending(); err != nil {
+		t.Fatalf("NextPending() after restart error = %v", err)
 	}
 }

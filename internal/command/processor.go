@@ -13,20 +13,28 @@ import (
 
 const cleanupInterval = time.Hour
 
-type Executor interface {
-	Execute(context.Context, string, agentv1.Command) (json.RawMessage, *protocol.Problem)
+var ErrRestartRequired = errors.New("Agent restart required")
+
+type Execution struct {
+	Output  json.RawMessage
+	Problem *protocol.Problem
+	Restart bool
 }
 
-type ExecutorFunc func(context.Context, string, agentv1.Command) (json.RawMessage, *protocol.Problem)
+type Executor interface {
+	Execute(context.Context, string, agentv1.Command) Execution
+}
 
-func (function ExecutorFunc) Execute(ctx context.Context, commandID string, value agentv1.Command) (json.RawMessage, *protocol.Problem) {
+type ExecutorFunc func(context.Context, string, agentv1.Command) Execution
+
+func (function ExecutorFunc) Execute(ctx context.Context, commandID string, value agentv1.Command) Execution {
 	return function(ctx, commandID, value)
 }
 
 type UnsupportedExecutor struct{}
 
-func (UnsupportedExecutor) Execute(_ context.Context, _ string, _ agentv1.Command) (json.RawMessage, *protocol.Problem) {
-	return nil, &protocol.Problem{Code: protocol.ErrorUnsupported, Message: "unsupported command", Retryable: false}
+func (UnsupportedExecutor) Execute(_ context.Context, _ string, _ agentv1.Command) Execution {
+	return Execution{Problem: &protocol.Problem{Code: protocol.ErrorUnsupported, Message: "unsupported command", Retryable: false}}
 }
 
 type Processor struct {
@@ -94,7 +102,10 @@ func (processor *Processor) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		result := processor.execute(ctx, record)
+		result, restart := processor.execute(ctx, record)
+		if restart {
+			return ErrRestartRequired
+		}
 		if err := processor.store.Complete(record.CommandID, record.RequestSHA256, result, processor.now()); err != nil {
 			return fmt.Errorf("persist command result: %w", err)
 		}
@@ -102,7 +113,7 @@ func (processor *Processor) Run(ctx context.Context) error {
 	}
 }
 
-func (processor *Processor) execute(parent context.Context, record record) agentv1.CommandResult {
+func (processor *Processor) execute(parent context.Context, record record) (agentv1.CommandResult, bool) {
 	now := processor.now()
 	result := agentv1.CommandResult{
 		CommandID: record.CommandID, RequestSHA256: record.RequestSHA256, CompletedAt: now,
@@ -110,7 +121,7 @@ func (processor *Processor) execute(parent context.Context, record record) agent
 	if !now.Before(record.Command.ExpiresAt) {
 		result.Status = agentv1.CommandStatusFailed
 		result.Problem = &protocol.Problem{Code: protocol.ErrorUnavailable, Message: "command expired before execution", Retryable: false}
-		return result
+		return result, false
 	}
 	deadline := now.Add(agentv1.MaximumCommandExecution)
 	if record.Command.ExpiresAt.Before(deadline) {
@@ -118,19 +129,22 @@ func (processor *Processor) execute(parent context.Context, record record) agent
 	}
 	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
-	output, problem := processor.executor.Execute(ctx, record.CommandID, record.Command)
+	execution := processor.executor.Execute(ctx, record.CommandID, record.Command)
 	result.CompletedAt = processor.now()
-	result.Output = output
-	if ctx.Err() != nil && problem == nil {
-		problem = &protocol.Problem{Code: protocol.ErrorUnavailable, Message: "command execution timed out", Retryable: false}
+	if execution.Restart {
+		return result, true
 	}
-	if problem == nil {
+	result.Output = execution.Output
+	if ctx.Err() != nil && execution.Problem == nil {
+		execution.Problem = &protocol.Problem{Code: protocol.ErrorUnavailable, Message: "command execution timed out", Retryable: false}
+	}
+	if execution.Problem == nil {
 		result.Status = agentv1.CommandStatusSucceeded
 	} else {
 		result.Status = agentv1.CommandStatusFailed
-		result.Problem = problem
+		result.Problem = execution.Problem
 	}
-	return result
+	return result, false
 }
 
 func (processor *Processor) NextResult() (agentv1.CommandResult, error) {

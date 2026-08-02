@@ -1,0 +1,75 @@
+#!/bin/sh
+set -u
+
+STATE_DIRECTORY=${RELAYWARD_AGENT_STATE_DIRECTORY:-/var/lib/relayward-agent}
+CONFIG_PATH=${RELAYWARD_AGENT_CONFIG_PATH:-/etc/relayward-agent/config.json}
+CURRENT_LINK="$STATE_DIRECTORY/current"
+PREVIOUS_LINK="$STATE_DIRECTORY/previous"
+PENDING_FILE="$STATE_DIRECTORY/update-pending.json"
+FAILED_FILE="$STATE_DIRECTORY/update-failed.json"
+child_pid=
+
+terminate() {
+    signal=$1
+    trap - "$signal"
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+        kill -s "$signal" "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+    fi
+    exit 0
+}
+
+trap 'terminate TERM' TERM
+trap 'terminate INT' INT
+trap 'terminate HUP' HUP
+
+switch_current() {
+    target=$1
+    temporary="$CURRENT_LINK.rollback-$$"
+    rm -f "$temporary"
+    ln -s "$target" "$temporary" || return 1
+    mv -f "$temporary" "$CURRENT_LINK"
+}
+
+managed_binary() {
+    path=$(readlink -f "$1") || return 1
+    case "$path" in
+        "$STATE_DIRECTORY"/versions/*/relayward-agent) printf '%s\n' "$path" ;;
+        *) return 1 ;;
+    esac
+}
+
+while :; do
+    current=$(managed_binary "$CURRENT_LINK") || {
+        echo "Relayward Agent current target is outside the managed versions directory" >&2
+        exit 1
+    }
+
+    "$current" run -config "$CONFIG_PATH" &
+    child_pid=$!
+    wait "$child_pid"
+    status=$?
+    child_pid=
+
+    if [ -f "$PENDING_FILE" ]; then
+        next=$(managed_binary "$CURRENT_LINK") || {
+            echo "Relayward Agent pending target is invalid" >&2
+            exit 1
+        }
+        if [ "$status" -eq 75 ] && [ "$next" != "$current" ]; then
+            continue
+        fi
+        previous=$(readlink "$PREVIOUS_LINK") || {
+            echo "Relayward Agent previous target is missing" >&2
+            exit "$status"
+        }
+        if ! switch_current "$previous"; then
+            echo "Relayward Agent automatic rollback failed" >&2
+            exit "$status"
+        fi
+        mv -f "$PENDING_FILE" "$FAILED_FILE"
+        echo "Relayward Agent update failed health validation; restored previous version" >&2
+        continue
+    fi
+    exit "$status"
+done

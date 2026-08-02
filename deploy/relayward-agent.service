@@ -1,0 +1,31 @@
+[Unit]
+Description=Relayward node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relayward-agent
+Group=relayward-agent
+ExecStart=/usr/local/libexec/relayward-agent-launcher
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/relayward-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

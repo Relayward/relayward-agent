@@ -31,6 +31,7 @@ import (
 	"github.com/Relayward/relayward-agent/internal/config"
 	"github.com/Relayward/relayward-agent/internal/eventqueue"
 	"github.com/Relayward/relayward-agent/internal/identity"
+	"github.com/Relayward/relayward-agent/internal/update"
 )
 
 const (
@@ -40,7 +41,17 @@ const (
 	writeTimeout         = 10 * time.Second
 )
 
-var capabilities = []string{agentv1.CapabilityControlCommands, agentv1.CapabilityControlHeartbeat, agentv1.CapabilityEventQueue}
+var capabilities = []string{
+	agentv1.CapabilityAgentSelfUpdate,
+	agentv1.CapabilityControlCommands,
+	agentv1.CapabilityControlHeartbeat,
+	agentv1.CapabilityEventQueue,
+}
+
+type updateController interface {
+	AwaitActivation(context.Context, string) error
+	Confirm(string) (bool, error)
+}
 
 type Client struct {
 	config     config.Config
@@ -48,6 +59,7 @@ type Client struct {
 	identities *identity.Store
 	commands   *commandstate.Processor
 	events     *eventqueue.Store
+	updates    updateController
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
 	logger     *slog.Logger
@@ -75,12 +87,22 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 	if err != nil {
 		return nil, fmt.Errorf("open command state: %w", err)
 	}
+	var updates updateController
+	if executor == nil {
+		manager, err := update.NewManager(normalized.StateDirectory)
+		if err != nil {
+			return nil, fmt.Errorf("initialize Agent updates: %w", err)
+		}
+		updates = manager
+		executor = update.NewExecutor(manager, version)
+	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig}
 	return &Client{
 		config:     normalized,
 		version:    version,
 		identities: identity.NewStore(normalized.StateDirectory),
 		commands:   commandstate.NewProcessor(commandStore, executor),
+		updates:    updates,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   connectTimeout,
@@ -126,7 +148,7 @@ func (client *Client) Run(ctx context.Context) error {
 		httpClient: client.httpClient, queue: events,
 	}
 	workerContext, stopWorkers := context.WithCancel(ctx)
-	workerFailure := make(chan error, 2)
+	workerFailure := make(chan error, 3)
 	var workers sync.WaitGroup
 	startWorker := func(name string, run func(context.Context) error) {
 		workers.Add(1)
@@ -140,6 +162,11 @@ func (client *Client) Run(ctx context.Context) error {
 	}
 	startWorker("command processor", client.commands.Run)
 	startWorker("event uploader", uploader.Run)
+	if client.updates != nil {
+		startWorker("update activation watchdog", func(ctx context.Context) error {
+			return client.updates.AwaitActivation(ctx, client.version)
+		})
+	}
 	defer func() {
 		stopWorkers()
 		workers.Wait()
@@ -352,6 +379,11 @@ func (client *Client) runSession(ctx context.Context, current identity.Identity)
 		if ack.Command != nil {
 			if err := client.commands.Accept(*ack.Command, client.now()); err != nil {
 				return stable, fmt.Errorf("persist center command: %w", err)
+			}
+		}
+		if client.updates != nil {
+			if _, err := client.updates.Confirm(client.version); err != nil {
+				return stable, fmt.Errorf("confirm Agent update health: %w", err)
 			}
 		}
 		stable = true
