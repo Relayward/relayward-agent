@@ -32,6 +32,7 @@ import (
 	"github.com/Relayward/relayward-agent/internal/eventqueue"
 	"github.com/Relayward/relayward-agent/internal/identity"
 	"github.com/Relayward/relayward-agent/internal/plugin"
+	localpolicy "github.com/Relayward/relayward-agent/internal/policy"
 	"github.com/Relayward/relayward-agent/internal/update"
 )
 
@@ -48,6 +49,7 @@ var capabilities = []string{
 	agentv1.CapabilityControlHeartbeat,
 	agentv1.CapabilityEventQueue,
 	agentv1.CapabilityPluginSupervision,
+	agentv1.CapabilityPolicyEnforcement,
 }
 
 type updateController interface {
@@ -62,6 +64,7 @@ type Client struct {
 	commands   *commandstate.Processor
 	events     *eventqueue.Store
 	plugins    *plugin.Supervisor
+	policies   *localpolicy.Engine
 	updates    updateController
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
@@ -92,6 +95,7 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 	}
 	var updates updateController
 	var plugins *plugin.Supervisor
+	var policies *localpolicy.Engine
 	if executor == nil {
 		manager, err := update.NewManager(normalized.StateDirectory)
 		if err != nil {
@@ -102,9 +106,14 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 		if err != nil {
 			return nil, fmt.Errorf("initialize plugin supervisor: %w", err)
 		}
+		policies, err = localpolicy.NewEngine(filepath.Join(normalized.StateDirectory, "policy.db"), plugins, logger)
+		if err != nil {
+			return nil, fmt.Errorf("initialize local policy engine: %w", err)
+		}
 		executor = commandstate.Router{
 			agentv1.CommandAgentUpdate:     update.NewExecutor(manager, version),
 			agentv1.CommandPluginReconcile: plugins,
+			agentv1.CommandPolicyReconcile: policies,
 		}
 	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig}
@@ -114,6 +123,7 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 		identities: identity.NewStore(normalized.StateDirectory),
 		commands:   commandstate.NewProcessor(commandStore, executor),
 		plugins:    plugins,
+		policies:   policies,
 		updates:    updates,
 		httpClient: &http.Client{
 			Transport: transport,
@@ -163,6 +173,9 @@ func (client *Client) Run(ctx context.Context) error {
 			return fmt.Errorf("start plugin supervisor: %w", err)
 		}
 	}
+	if client.policies != nil {
+		client.policies.SetEventSink(events)
+	}
 	uploader := &eventUploader{
 		endpoint: client.httpURL("/api/v1/agent/events/" + current.NodeID), credential: current.Credential,
 		httpClient: client.httpClient, queue: events,
@@ -181,6 +194,9 @@ func (client *Client) Run(ctx context.Context) error {
 	}
 	startWorker("command processor", client.commands.Run)
 	startWorker("event uploader", uploader.Run)
+	if client.policies != nil {
+		startWorker("local policy engine", client.policies.Run)
+	}
 	if client.updates != nil {
 		startWorker("update activation watchdog", func(ctx context.Context) error {
 			return client.updates.AwaitActivation(ctx, client.version)
@@ -194,6 +210,9 @@ func (client *Client) Run(ctx context.Context) error {
 			cancel()
 		}
 		workers.Wait()
+		if client.policies != nil {
+			_ = client.policies.Close()
+		}
 	}()
 
 	backoff := time.Second

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
+	nodepluginv1 "github.com/Relayward/relayward-sdk/nodeplugin/v1"
 
 	commandstate "github.com/Relayward/relayward-agent/internal/command"
 )
@@ -81,6 +83,27 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	actor.mu.Unlock()
 	if crashed == nil {
 		t.Fatal("running plugin process is missing")
+	}
+	runtimes := supervisor.RunningPlugins()
+	if len(runtimes) != 1 || runtimes[0].TelemetryStreamID == "" ||
+		!nodepluginv1.HasCapability(runtimes[0].Capabilities, nodepluginv1.CapabilityDynamicBlocking) {
+		t.Fatalf("running plugin capabilities = %+v", runtimes)
+	}
+	if _, err := supervisor.CollectTelemetry(context.Background(), running.PluginID, 0); err != nil {
+		t.Fatalf("CollectTelemetry() error = %v", err)
+	}
+	authorizationID := "123e4567-e89b-42d3-a456-426614174000"
+	state := &nodepluginv1.SetServiceStateRequest{PolicyGeneration: 1, StateRevision: 1,
+		AuthorizationId: authorizationID, ServiceId: "main", Enabled: true,
+		Reason: nodepluginv1.ServiceStateReason_SERVICE_STATE_REASON_ACTIVE}
+	if err := supervisor.SetServiceState(context.Background(), running.PluginID, state); err != nil {
+		t.Fatalf("SetServiceState() error = %v", err)
+	}
+	blocks := &nodepluginv1.ReplaceDynamicBlocksRequest{PolicyGeneration: 1, BlockRevision: 1,
+		Blocks: []*nodepluginv1.DynamicBlock{{AuthorizationId: authorizationID, ServiceId: "main", SourceIp: "192.0.2.1",
+			ExpiresAtUnixNano: time.Now().Add(time.Minute).UnixNano()}}}
+	if err := supervisor.ReplaceDynamicBlocks(context.Background(), running.PluginID, blocks); err != nil {
+		t.Fatalf("ReplaceDynamicBlocks() error = %v", err)
 	}
 	if err := syscall.Kill(-crashed.command.Process.Pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill plugin process: %v", err)
@@ -172,6 +195,21 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	defer closeCancel()
 	if err := supervisor.Close(closeContext); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestSupervisorExcludesUncommittedPluginProcessFromRuntimeHost(t *testing.T) {
+	pluginID := "io.relayward.contract-test"
+	process := &managedProcess{pluginID: pluginID, done: make(chan struct{}), client: &processClient{}, ready: false}
+	supervisor := &Supervisor{
+		actors:       map[string]*pluginActor{pluginID: {process: process}},
+		capabilities: make(map[string][]string),
+	}
+	if values := supervisor.RunningPlugins(); len(values) != 0 {
+		t.Fatalf("uncommitted process advertised as running: %+v", values)
+	}
+	if _, err := supervisor.CollectTelemetry(context.Background(), pluginID, 0); !errors.Is(err, ErrPluginUnavailable) {
+		t.Fatalf("CollectTelemetry() error = %v", err)
 	}
 }
 

@@ -34,18 +34,22 @@ var (
 )
 
 type managedProcess struct {
+	pluginID   string
 	command    *exec.Cmd
 	socketPath string
 	client     *processClient
 	done       chan struct{}
 	waitError  error
 	startedAt  time.Time
+	ready      bool
 }
 
 type processClient struct {
-	connection *grpc.ClientConn
-	client     nodepluginv1.NodePluginClient
-	closeOnce  sync.Once
+	connection        *grpc.ClientConn
+	client            nodepluginv1.NodePluginClient
+	capabilities      []string
+	telemetryStreamID string
+	closeOnce         sync.Once
 }
 
 type processRuntime struct {
@@ -89,7 +93,7 @@ func (runtime *processRuntime) start(ctx context.Context, pluginID, version, exe
 	if err := command.Start(); err != nil {
 		return nil, nil, fmt.Errorf("start plugin process: %w", err)
 	}
-	process := &managedProcess{command: command, socketPath: socketPath, done: make(chan struct{}), startedAt: time.Now().UTC()}
+	process := &managedProcess{pluginID: pluginID, command: command, socketPath: socketPath, done: make(chan struct{}), startedAt: time.Now().UTC()}
 	go func() {
 		process.waitError = command.Wait()
 		close(process.done)
@@ -146,6 +150,8 @@ func connectPlugin(parent context.Context, process *managedProcess, pluginID, ve
 		connection.Close()
 		return nil, fmt.Errorf("%w: %v", ErrPluginIdentityMismatch, err)
 	}
+	client.capabilities = append([]string(nil), info.Capabilities...)
+	client.telemetryStreamID = info.TelemetryStreamId
 	return client, nil
 }
 
@@ -234,6 +240,52 @@ func (client *processClient) getStatus(ctx context.Context) (*nodepluginv1.GetSt
 		return nil, fmt.Errorf("validate plugin health response: %w", err)
 	}
 	return status, nil
+}
+
+func (client *processClient) collectTelemetry(ctx context.Context, afterSequence uint64) (*nodepluginv1.CollectTelemetryResponse, error) {
+	request := &nodepluginv1.CollectTelemetryRequest{AfterSequence: afterSequence, MaximumEvents: nodepluginv1.MaximumTelemetryEvents}
+	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	defer cancel()
+	response, err := client.client.CollectTelemetry(rpcContext, request)
+	if err != nil {
+		return nil, errors.New("plugin telemetry RPC failed")
+	}
+	if err := nodepluginv1.ValidateCollectTelemetryResponse(request, response); err != nil {
+		return nil, fmt.Errorf("validate plugin telemetry response: %w", err)
+	}
+	return response, nil
+}
+
+func (client *processClient) setServiceState(ctx context.Context, request *nodepluginv1.SetServiceStateRequest) error {
+	if err := nodepluginv1.ValidateSetServiceStateRequest(request); err != nil {
+		return err
+	}
+	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	defer cancel()
+	response, err := client.client.SetServiceState(rpcContext, request)
+	if err != nil {
+		return errors.New("plugin service state RPC failed")
+	}
+	if err := nodepluginv1.ValidateSetServiceStateResponse(request, response); err != nil {
+		return fmt.Errorf("validate plugin service state response: %w", err)
+	}
+	return nil
+}
+
+func (client *processClient) replaceDynamicBlocks(ctx context.Context, request *nodepluginv1.ReplaceDynamicBlocksRequest) error {
+	if err := nodepluginv1.ValidateReplaceDynamicBlocksRequest(request); err != nil {
+		return err
+	}
+	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	defer cancel()
+	response, err := client.client.ReplaceDynamicBlocks(rpcContext, request)
+	if err != nil {
+		return errors.New("plugin dynamic block RPC failed")
+	}
+	if err := nodepluginv1.ValidateReplaceDynamicBlocksResponse(request, response); err != nil {
+		return fmt.Errorf("validate plugin dynamic block response: %w", err)
+	}
+	return nil
 }
 
 func configurationRequest(desired desiredState) *nodepluginv1.ConfigurationRequest {

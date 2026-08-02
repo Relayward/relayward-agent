@@ -3,13 +3,16 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
+	nodepluginv1 "github.com/Relayward/relayward-sdk/nodeplugin/v1"
 	"github.com/Relayward/relayward-sdk/protocol"
 
 	commandstate "github.com/Relayward/relayward-agent/internal/command"
@@ -38,13 +41,14 @@ type Supervisor struct {
 	logger              *slog.Logger
 	healthCheckInterval time.Duration
 
-	mu       sync.Mutex
-	actors   map[string]*pluginActor
-	events   eventSink
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
-	stopping bool
+	mu           sync.Mutex
+	actors       map[string]*pluginActor
+	capabilities map[string][]string
+	events       eventSink
+	ctx          context.Context
+	cancel       context.CancelFunc
+	started      bool
+	stopping     bool
 }
 
 func NewSupervisor(stateDirectory string, logger *slog.Logger) (*Supervisor, error) {
@@ -58,6 +62,7 @@ func NewSupervisor(stateDirectory string, logger *slog.Logger) (*Supervisor, err
 	return &Supervisor{
 		store: store, installer: newInstaller(store, nil, nil), runtime: &processRuntime{store: store},
 		logger: logger, healthCheckInterval: defaultHealthCheckInterval, actors: make(map[string]*pluginActor),
+		capabilities: make(map[string][]string),
 	}, nil
 }
 
@@ -261,7 +266,9 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 		return pluginFailure(protocol.ErrorInternal, "commit plugin state", false)
 	}
 	if candidate != nil {
+		candidate.ready = true
 		actor.process = candidate
+		supervisor.setCapabilities(desired.PluginID, candidate.client.capabilities)
 		actor.crashStreak = 0
 		supervisor.watch(desired.PluginID, actor, candidate)
 	}
@@ -327,6 +334,8 @@ func (supervisor *Supervisor) startRevision(ctx context.Context, pluginID string
 	if err != nil {
 		return nil, errors.Join(err, process.stop(context.Background()))
 	}
+	process.ready = true
+	supervisor.setCapabilities(pluginID, client.capabilities)
 	return process, nil
 }
 
@@ -383,6 +392,7 @@ func (supervisor *Supervisor) detachAndStop(ctx context.Context, actor *pluginAc
 		}
 		return err
 	}
+	supervisor.clearCapabilities(process)
 	return nil
 }
 
@@ -458,6 +468,7 @@ func (supervisor *Supervisor) watch(pluginID string, actor *pluginActor, process
 					return
 				}
 			}
+			supervisor.setCapabilities(pluginID, nil)
 			if time.Since(process.startedAt) >= stableProcessDuration {
 				actor.crashStreak = 0
 			}
@@ -530,9 +541,13 @@ func (supervisor *Supervisor) emitRevision(pluginID string, value revision, rest
 	if value.State == agentv1.PluginStateRunning {
 		health = agentv1.PluginHealthHealthy
 	}
+	capabilities := supervisor.pluginCapabilities(pluginID)
+	if value.State != agentv1.PluginStateRunning {
+		capabilities = nil
+	}
 	return supervisor.emit(agentv1.PluginStatusEvent{
 		PluginID: pluginID, Generation: value.Generation, State: value.State, Version: value.Version,
-		ConfigurationSHA256: value.ConfigurationSHA256, Health: health, RestartCount: restartCount,
+		ConfigurationSHA256: value.ConfigurationSHA256, Health: health, RestartCount: restartCount, Capabilities: capabilities,
 	})
 }
 
@@ -584,6 +599,97 @@ func (supervisor *Supervisor) context() context.Context {
 		return context.Background()
 	}
 	return supervisor.ctx
+}
+
+type RuntimeInfo struct {
+	PluginID          string
+	InstanceID        string
+	Capabilities      []string
+	TelemetryStreamID string
+}
+
+var ErrPluginUnavailable = errors.New("plugin runtime is unavailable")
+
+func (supervisor *Supervisor) RunningPlugins() []RuntimeInfo {
+	supervisor.mu.Lock()
+	pluginIDs := make([]string, 0, len(supervisor.actors))
+	for pluginID := range supervisor.actors {
+		pluginIDs = append(pluginIDs, pluginID)
+	}
+	supervisor.mu.Unlock()
+	sort.Strings(pluginIDs)
+	values := make([]RuntimeInfo, 0, len(pluginIDs))
+	for _, pluginID := range pluginIDs {
+		actor := supervisor.actor(pluginID)
+		actor.mu.Lock()
+		process := actor.process
+		if process != nil && process.ready && !process.exited() {
+			values = append(values, RuntimeInfo{PluginID: pluginID, InstanceID: processInstanceID(process),
+				Capabilities: append([]string(nil), process.client.capabilities...), TelemetryStreamID: process.client.telemetryStreamID})
+		}
+		actor.mu.Unlock()
+	}
+	return values
+}
+
+func (supervisor *Supervisor) CollectTelemetry(ctx context.Context, pluginID string, afterSequence uint64) (*nodepluginv1.CollectTelemetryResponse, error) {
+	actor := supervisor.actor(pluginID)
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.process == nil || !actor.process.ready || actor.process.exited() {
+		return nil, ErrPluginUnavailable
+	}
+	return actor.process.client.collectTelemetry(ctx, afterSequence)
+}
+
+func (supervisor *Supervisor) SetServiceState(ctx context.Context, pluginID string, request *nodepluginv1.SetServiceStateRequest) error {
+	actor := supervisor.actor(pluginID)
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.process == nil || !actor.process.ready || actor.process.exited() {
+		return ErrPluginUnavailable
+	}
+	return actor.process.client.setServiceState(ctx, request)
+}
+
+func (supervisor *Supervisor) ReplaceDynamicBlocks(ctx context.Context, pluginID string, request *nodepluginv1.ReplaceDynamicBlocksRequest) error {
+	actor := supervisor.actor(pluginID)
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.process == nil || !actor.process.ready || actor.process.exited() {
+		return ErrPluginUnavailable
+	}
+	return actor.process.client.replaceDynamicBlocks(ctx, request)
+}
+
+func (supervisor *Supervisor) setCapabilities(pluginID string, values []string) {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if len(values) == 0 {
+		delete(supervisor.capabilities, pluginID)
+		return
+	}
+	supervisor.capabilities[pluginID] = append([]string(nil), values...)
+}
+
+func (supervisor *Supervisor) pluginCapabilities(pluginID string) []string {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	return append([]string(nil), supervisor.capabilities[pluginID]...)
+}
+
+func (supervisor *Supervisor) clearCapabilities(process *managedProcess) {
+	if process == nil {
+		return
+	}
+	supervisor.setCapabilities(process.pluginID, nil)
+}
+
+func processInstanceID(process *managedProcess) string {
+	if process == nil || process.command == nil || process.command.Process == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", process.command.Process.Pid, process.startedAt.UnixNano())
 }
 
 func pluginFailure(code protocol.ErrorCode, message string, retryable bool) commandstate.Execution {
