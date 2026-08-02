@@ -352,6 +352,9 @@ func (store *Store) ApplyCounters(pluginID string, counters []*nodepluginv1.Traf
 			if counter == nil {
 				continue
 			}
+			if counter.UploadBytes > math.MaxInt64 || counter.DownloadBytes > math.MaxInt64 {
+				return errors.New("traffic counter exceeds durable ledger capacity")
+			}
 			key := serviceKey(pluginID, counter.AuthorizationId, counter.ServiceId)
 			if _, known := bindings[key]; !known {
 				continue
@@ -387,8 +390,11 @@ func (store *Store) ApplyCounters(pluginID string, counters []*nodepluginv1.Traf
 			if err != nil {
 				return err
 			}
-			if math.MaxUint64-ledger.UploadBytes < delta.upload || math.MaxUint64-ledger.DownloadBytes < delta.download {
+			if uint64(math.MaxInt64)-ledger.UploadBytes < delta.upload || uint64(math.MaxInt64)-ledger.DownloadBytes < delta.download {
 				return errors.New("traffic ledger overflow")
+			}
+			if ledger.Revision >= math.MaxInt64 {
+				return errors.New("traffic ledger revision is exhausted")
 			}
 			ledger.UploadBytes += delta.upload
 			ledger.DownloadBytes += delta.download

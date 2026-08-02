@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -53,6 +54,12 @@ func TestStoreAggregatesMonotonicCountersAcrossPluginsAndPeriods(t *testing.T) {
 	traffic := pendingTraffic(t, store, now.Add(5*time.Second))
 	if traffic.UploadBytes != 165 || traffic.DownloadBytes != 276 || traffic.Revision != 5 {
 		t.Fatalf("aggregated traffic = %+v", traffic)
+	}
+	if err := store.ApplyCounters("io.relayward.alpha", []*nodepluginv1.TrafficCounter{{
+		AuthorizationId: testAuthorizationID, ServiceId: "main", CounterEpoch: "overflow",
+		UploadBytes: math.MaxInt64 + 1,
+	}}, now.Add(6*time.Second)); err == nil {
+		t.Fatal("ApplyCounters() accepted bytes above durable ledger capacity")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
