@@ -30,6 +30,12 @@ jobs:
           shellcheck deploy/install.sh deploy/uninstall.sh deploy/relayward-agent-launcher deploy/relayward-agent.openrc scripts/build-release.sh
       - name: Build Linux AMD64 release
         run: ./scripts/build-release.sh "${GITHUB_REF_NAME}" dist
+      - name: Test systemd and OpenRC installation
+        env:
+          RELAYWARD_AGENT_INSTALL_INTEGRATION: "1"
+          RELAYWARD_AGENT_RELEASE_DIR: ${{ github.workspace }}/dist
+          RELAYWARD_AGENT_RELEASE_VERSION: ${{ github.ref_name }}
+        run: go test ./integration -count=1
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:

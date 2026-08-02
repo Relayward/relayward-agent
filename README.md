@@ -40,6 +40,8 @@ RELAYWARD_REGISTRATION_TOKEN=rwr_example relayward-agent enroll
 relayward-agent run
 ```
 
+After an Agent credential is revoked, generate a new registration token for the same node and run the installer again with `RELAYWARD_REGISTRATION_TOKEN`. An existing service is stopped only for enrollment, then restarted with the replacement identity. If enrollment fails, the installer restarts the previous service and leaves its identity unchanged.
+
 The identity is stored at `/var/lib/relayward-agent/identity.json` with mode `0600`. The registration token and node credential are never printed by these commands.
 
 Accepted commands and terminal results are stored as owner-only JSON files under `/var/lib/relayward-agent/commands`. Heartbeats continue while commands execute. A terminal result remains on disk and is resent after reconnect until the center acknowledges it; acknowledged records are retained for 24 hours to prevent duplicate execution.
@@ -71,6 +73,16 @@ For a running desired state, the Agent verifies plugin identity, validates and a
 go test ./...
 go vet ./...
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/relayward-agent
+```
+
+The privileged installer integration suite runs only when explicitly enabled and requires Docker. Build a local release before invoking it:
+
+```bash
+./scripts/build-release.sh v0.0.0-ci /tmp/relayward-agent-release
+RELAYWARD_AGENT_INSTALL_INTEGRATION=1 \
+RELAYWARD_AGENT_RELEASE_DIR=/tmp/relayward-agent-release \
+RELAYWARD_AGENT_RELEASE_VERSION=0.0.0-ci \
+go test ./integration -count=1
 ```
 
 Print build information:

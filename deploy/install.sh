@@ -238,6 +238,7 @@ install_root_asset "$temporary/relayward-agent-launcher" /usr/local/libexec/rela
 install_root_asset "$temporary/uninstall.sh" /usr/local/sbin/relayward-agent-uninstall 0755
 if [ "$INIT_SYSTEM" = systemd ]; then
     install_root_asset "$temporary/relayward-agent.service" /etc/systemd/system/relayward-agent.service 0644
+    systemctl daemon-reload
 else
     install_root_asset "$temporary/relayward-agent.openrc" /etc/init.d/relayward-agent 0755
 fi
@@ -272,13 +273,36 @@ if [ ! -f "$STATE_DIRECTORY/identity.json" ] && [ -z "${RELAYWARD_REGISTRATION_T
     exit 2
 fi
 if [ -n "${RELAYWARD_REGISTRATION_TOKEN:-}" ]; then
-    run_as_agent env RELAYWARD_REGISTRATION_TOKEN="$RELAYWARD_REGISTRATION_TOKEN" \
-        /usr/local/bin/relayward-agent enroll -config "$CONFIG_PATH"
+    service_stopped=false
+    if [ "$INIT_SYSTEM" = systemd ]; then
+        if systemctl --quiet is-active relayward-agent.service; then
+            systemctl stop relayward-agent.service
+            service_stopped=true
+        fi
+    elif rc-service relayward-agent status >/dev/null 2>&1; then
+        rc-service relayward-agent stop
+        service_stopped=true
+    fi
+    if ! run_as_agent env RELAYWARD_REGISTRATION_TOKEN="$RELAYWARD_REGISTRATION_TOKEN" \
+        /usr/local/bin/relayward-agent enroll -config "$CONFIG_PATH"; then
+        if [ "$service_stopped" = true ]; then
+            if [ "$INIT_SYSTEM" = systemd ]; then
+                systemctl start relayward-agent.service
+            else
+                rc-service relayward-agent start
+            fi
+        fi
+        exit 1
+    fi
 fi
 
 if [ "$INIT_SYSTEM" = systemd ]; then
-    systemctl daemon-reload
-    systemctl enable --now relayward-agent.service
+    systemctl enable relayward-agent.service
+    if systemctl --quiet is-active relayward-agent.service; then
+        systemctl restart relayward-agent.service
+    else
+        systemctl start relayward-agent.service
+    fi
     systemctl --quiet is-active relayward-agent.service
 else
     rc-update add relayward-agent default

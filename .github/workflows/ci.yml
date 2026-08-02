@@ -27,3 +27,9 @@ jobs:
       - run: shellcheck deploy/install.sh deploy/uninstall.sh deploy/relayward-agent-launcher deploy/relayward-agent.openrc scripts/build-release.sh
       - run: ./scripts/build-release.sh v0.0.0-ci /tmp/relayward-agent-release
       - run: cd /tmp/relayward-agent-release && sha256sum -c SHA256SUMS
+      - name: Test systemd and OpenRC installation
+        env:
+          RELAYWARD_AGENT_INSTALL_INTEGRATION: "1"
+          RELAYWARD_AGENT_RELEASE_DIR: /tmp/relayward-agent-release
+          RELAYWARD_AGENT_RELEASE_VERSION: 0.0.0-ci
+        run: go test ./integration -count=1
