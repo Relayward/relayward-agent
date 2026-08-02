@@ -4,7 +4,7 @@ Relayward Agent is the native node-side component of Relayward. It maintains an 
 
 The supported targets are Debian/systemd and Alpine/OpenRC on Linux AMD64. The Agent does not require Docker and does not embed Xray, sing-box, or any other proxy core.
 
-The Agent supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, durable idempotent commands, an at-least-once event queue, supervised self-update, and generic node-plugin supervision with automatic rollback. Local traffic, quota, and IP policy enforcement are implemented in later first-release stages.
+The Agent supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, durable idempotent commands, an at-least-once event queue, supervised self-update, generic node-plugin supervision with automatic rollback, and offline traffic, quota, expiry, reset, and soft IP policy enforcement.
 
 ## Installation
 
