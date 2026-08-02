@@ -1,5 +1,5 @@
-github.com/Relayward/relayward-sdk v0.0.0-20260802164751-a8df75084b35 h1:PCwjZycZDhlgy48sr4dtk9WUm9g6QDFXc6BtcJUS+HA=
-github.com/Relayward/relayward-sdk v0.0.0-20260802164751-a8df75084b35/go.mod h1:Igle/zyojzhbyyzK4JIhSronw6YSXUI61bxfIUgS33M=
+github.com/Relayward/relayward-sdk v0.1.0 h1:BTZxBoeq06ZrGir3mMOcLG7TfQB0FceXcfp7ANbT3Dk=
+github.com/Relayward/relayward-sdk v0.1.0/go.mod h1:Igle/zyojzhbyyzK4JIhSronw6YSXUI61bxfIUgS33M=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
