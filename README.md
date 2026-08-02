@@ -4,7 +4,7 @@ Relayward Agent is the native node-side component of Relayward. It maintains an 
 
 The supported targets are Debian/systemd and Alpine/OpenRC on Linux AMD64. The Agent does not require Docker and does not embed Xray, sing-box, or any other proxy core.
 
-The Agent currently supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, durable idempotent commands, an at-least-once event queue, and supervised self-update with automatic rollback. Plugin supervision and local policy enforcement are implemented in later first-release stages.
+The Agent supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, durable idempotent commands, an at-least-once event queue, supervised self-update, and generic node-plugin supervision with automatic rollback. Local traffic, quota, and IP policy enforcement are implemented in later first-release stages.
 
 ## Installation
 
@@ -45,6 +45,25 @@ The identity is stored at `/var/lib/relayward-agent/identity.json` with mode `06
 Accepted commands and terminal results are stored as owner-only JSON files under `/var/lib/relayward-agent/commands`. Heartbeats continue while commands execute. A terminal result remains on disk and is resent after reconnect until the center acknowledges it; acknowledged records are retained for 24 hours to prevent duplicate execution.
 
 Events are stored in the owner-only `/var/lib/relayward-agent/events.db` queue with 64 MiB and 100,000-event default limits. The Agent uploads independent gzip batches over HTTPS and removes only the highest contiguous range acknowledged by the center.
+
+## Node Plugin Supervision
+
+The Agent advertises `plugin.supervision` and accepts full `plugin.reconcile` desired states through the existing durable command queue. Desired generations are monotonic per plugin. Replaying the same generation and content is idempotent; stale or conflicting generations are rejected.
+
+Node artifacts are downloaded directly from approved GitHub Release hosts over HTTPS. Every initial URL and redirect is checked, and the exact size and SHA-256 supplied by the center must match before the artifact is made executable. Immutable artifacts are reverified before reuse. The active, previous, and pending releases are retained for recovery; unrelated old releases are removed after a successful transition.
+
+Plugin state is private under `/var/lib/relayward-agent/plugins`:
+
+```text
+state/       desired, active, previous, and pending revisions
+releases/    verified immutable executables
+data/        plugin-owned persistent data
+runtime/     private runtime directories and Unix sockets
+```
+
+Each artifact runs as a separate process under the Agent service account and service sandbox. It receives only a minimal environment and communicates through the versioned SDK gRPC API on an Agent-owned Unix socket. Standard output and standard error are not copied into Agent informational logs.
+
+For a running desired state, the Agent verifies plugin identity, validates and applies the full configuration, then waits for the exact generation and configuration digest to become healthy before committing. A failed transition restores the last successful running revision. Unexpected process exits trigger bounded exponential restart, while a full Agent restart reconstructs the last committed running state before new commands execute. Terminal and crash states enter the durable event queue as `plugin.status` events.
 
 ## Local Checks
 

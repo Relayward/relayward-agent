@@ -31,6 +31,7 @@ import (
 	"github.com/Relayward/relayward-agent/internal/config"
 	"github.com/Relayward/relayward-agent/internal/eventqueue"
 	"github.com/Relayward/relayward-agent/internal/identity"
+	"github.com/Relayward/relayward-agent/internal/plugin"
 	"github.com/Relayward/relayward-agent/internal/update"
 )
 
@@ -46,6 +47,7 @@ var capabilities = []string{
 	agentv1.CapabilityControlCommands,
 	agentv1.CapabilityControlHeartbeat,
 	agentv1.CapabilityEventQueue,
+	agentv1.CapabilityPluginSupervision,
 }
 
 type updateController interface {
@@ -59,6 +61,7 @@ type Client struct {
 	identities *identity.Store
 	commands   *commandstate.Processor
 	events     *eventqueue.Store
+	plugins    *plugin.Supervisor
 	updates    updateController
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
@@ -88,13 +91,21 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 		return nil, fmt.Errorf("open command state: %w", err)
 	}
 	var updates updateController
+	var plugins *plugin.Supervisor
 	if executor == nil {
 		manager, err := update.NewManager(normalized.StateDirectory)
 		if err != nil {
 			return nil, fmt.Errorf("initialize Agent updates: %w", err)
 		}
 		updates = manager
-		executor = update.NewExecutor(manager, version)
+		plugins, err = plugin.NewSupervisor(normalized.StateDirectory, logger)
+		if err != nil {
+			return nil, fmt.Errorf("initialize plugin supervisor: %w", err)
+		}
+		executor = commandstate.Router{
+			agentv1.CommandAgentUpdate:     update.NewExecutor(manager, version),
+			agentv1.CommandPluginReconcile: plugins,
+		}
 	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig}
 	return &Client{
@@ -102,6 +113,7 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 		version:    version,
 		identities: identity.NewStore(normalized.StateDirectory),
 		commands:   commandstate.NewProcessor(commandStore, executor),
+		plugins:    plugins,
 		updates:    updates,
 		httpClient: &http.Client{
 			Transport: transport,
@@ -143,12 +155,19 @@ func (client *Client) Run(ctx context.Context) error {
 	}
 	client.events = events
 	defer events.Close()
+	workerContext, stopWorkers := context.WithCancel(ctx)
+	if client.plugins != nil {
+		client.plugins.SetEventSink(events)
+		if err := client.plugins.Start(workerContext); err != nil {
+			stopWorkers()
+			return fmt.Errorf("start plugin supervisor: %w", err)
+		}
+	}
 	uploader := &eventUploader{
 		endpoint: client.httpURL("/api/v1/agent/events/" + current.NodeID), credential: current.Credential,
 		httpClient: client.httpClient, queue: events,
 	}
-	workerContext, stopWorkers := context.WithCancel(ctx)
-	workerFailure := make(chan error, 3)
+	workerFailure := make(chan error, 4)
 	var workers sync.WaitGroup
 	startWorker := func(name string, run func(context.Context) error) {
 		workers.Add(1)
@@ -169,6 +188,11 @@ func (client *Client) Run(ctx context.Context) error {
 	}
 	defer func() {
 		stopWorkers()
+		if client.plugins != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = client.plugins.Close(shutdownContext)
+			cancel()
+		}
 		workers.Wait()
 	}()
 
