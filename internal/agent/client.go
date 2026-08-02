@@ -16,8 +16,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +29,7 @@ import (
 
 	commandstate "github.com/Relayward/relayward-agent/internal/command"
 	"github.com/Relayward/relayward-agent/internal/config"
+	"github.com/Relayward/relayward-agent/internal/eventqueue"
 	"github.com/Relayward/relayward-agent/internal/identity"
 )
 
@@ -37,13 +40,14 @@ const (
 	writeTimeout         = 10 * time.Second
 )
 
-var capabilities = []string{agentv1.CapabilityControlCommands, agentv1.CapabilityControlHeartbeat}
+var capabilities = []string{agentv1.CapabilityControlCommands, agentv1.CapabilityControlHeartbeat, agentv1.CapabilityEventQueue}
 
 type Client struct {
 	config     config.Config
 	version    string
 	identities *identity.Store
 	commands   *commandstate.Processor
+	events     *eventqueue.Store
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
 	logger     *slog.Logger
@@ -109,19 +113,36 @@ func (client *Client) Run(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("load Agent identity: %w", err)
 	}
-	processorContext, stopProcessor := context.WithCancel(ctx)
-	processorFailure := make(chan error, 1)
-	processorDone := make(chan struct{})
-	go func() {
-		defer close(processorDone)
-		if err := client.commands.Run(processorContext); err != nil {
-			processorFailure <- err
-			stopProcessor()
-		}
-	}()
+	events, err := eventqueue.Open(eventqueue.Config{
+		Path: filepath.Join(client.config.StateDirectory, "events.db"), NodeID: current.NodeID,
+	})
+	if err != nil {
+		return fmt.Errorf("open event queue: %w", err)
+	}
+	client.events = events
+	defer events.Close()
+	uploader := &eventUploader{
+		endpoint: client.httpURL("/api/v1/agent/events/" + current.NodeID), credential: current.Credential,
+		httpClient: client.httpClient, queue: events,
+	}
+	workerContext, stopWorkers := context.WithCancel(ctx)
+	workerFailure := make(chan error, 2)
+	var workers sync.WaitGroup
+	startWorker := func(name string, run func(context.Context) error) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := run(workerContext); err != nil {
+				workerFailure <- fmt.Errorf("%s: %w", name, err)
+				stopWorkers()
+			}
+		}()
+	}
+	startWorker("command processor", client.commands.Run)
+	startWorker("event uploader", uploader.Run)
 	defer func() {
-		stopProcessor()
-		<-processorDone
+		stopWorkers()
+		workers.Wait()
 	}()
 
 	backoff := time.Second
@@ -129,13 +150,13 @@ func (client *Client) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		stable, sessionErr := client.runSession(processorContext, current)
+		stable, sessionErr := client.runSession(workerContext, current)
 		if ctx.Err() != nil {
 			return nil
 		}
 		select {
-		case err := <-processorFailure:
-			return fmt.Errorf("run command processor: %w", err)
+		case err := <-workerFailure:
+			return fmt.Errorf("run Agent worker: %w", err)
 		default:
 		}
 		if errors.Is(sessionErr, commandstate.ErrConflict) {
@@ -151,9 +172,9 @@ func (client *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil
-		case err := <-processorFailure:
+		case err := <-workerFailure:
 			timer.Stop()
-			return fmt.Errorf("run command processor: %w", err)
+			return fmt.Errorf("run Agent worker: %w", err)
 		case <-timer.C:
 		}
 		backoff *= 2

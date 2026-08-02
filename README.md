@@ -4,7 +4,7 @@ Relayward Agent is the native node-side component of Relayward. It maintains an 
 
 The supported targets are Debian/systemd and Alpine/OpenRC on Linux AMD64. The Agent does not require Docker and does not embed Xray, sing-box, or any other proxy core.
 
-The Agent currently supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, and durable idempotent commands. Durable event queues, plugin supervision, init-system installation, and self-update are implemented in later first-release stages.
+The Agent currently supports one-time registration, an authenticated outbound WebSocket control session, persisted heartbeats, durable idempotent commands, and an at-least-once event queue. Plugin supervision, init-system installation, and self-update are implemented in later first-release stages.
 
 ## Registration And Control
 
@@ -28,6 +28,8 @@ relayward-agent run
 The identity is stored at `/var/lib/relayward-agent/identity.json` with mode `0600`. The registration token and node credential are never printed by these commands.
 
 Accepted commands and terminal results are stored as owner-only JSON files under `/var/lib/relayward-agent/commands`. Heartbeats continue while commands execute. A terminal result remains on disk and is resent after reconnect until the center acknowledges it; acknowledged records are retained for 24 hours to prevent duplicate execution.
+
+Events are stored in the owner-only `/var/lib/relayward-agent/events.db` queue with 64 MiB and 100,000-event default limits. The Agent uploads independent gzip batches over HTTPS and removes only the highest contiguous range acknowledged by the center.
 
 ## Local Checks
 
