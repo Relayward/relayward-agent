@@ -1,0 +1,5 @@
+/relayward-agent
+/dist/
+/tmp/
+*.test
+*.out
