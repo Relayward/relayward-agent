@@ -17,6 +17,7 @@ import (
 	"github.com/Relayward/relayward-agent/internal/buildinfo"
 	commandstate "github.com/Relayward/relayward-agent/internal/command"
 	"github.com/Relayward/relayward-agent/internal/config"
+	"github.com/Relayward/relayward-agent/internal/plugin"
 )
 
 const restartExitCode = 75
@@ -32,6 +33,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "plugin-exec":
+		if err := plugin.RunLimitedPlugin(args[1:]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case "version":
 		if len(args) == 2 && args[1] == "--short" {
 			fmt.Fprintln(stdout, buildinfo.Version)

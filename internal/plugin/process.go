@@ -77,7 +77,11 @@ func (runtime *processRuntime) start(ctx context.Context, pluginID, version, exe
 	if err := removeStaleSocket(socketPath); err != nil {
 		return nil, nil, err
 	}
-	command := exec.Command(executable)
+	launcher, err := os.Executable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve plugin launcher: %w", err)
+	}
+	command := exec.Command(launcher, "plugin-exec", executable)
 	command.Dir = dataDirectory
 	command.Env = []string{
 		"HOME=" + dataDirectory,

@@ -65,6 +65,8 @@ runtime/     private runtime directories and Unix sockets
 
 Each artifact runs as a separate process under the Agent service account and service sandbox. It receives only a minimal environment and communicates through the versioned SDK gRPC API on an Agent-owned Unix socket. Standard output and standard error are not copied into Agent informational logs.
 
+Each node plugin process receives hard limits of 1 GiB writable memory and 65,536 open files, with core dumps disabled. The 256-process limit is shared by processes running under the restricted `relayward-agent` account. RPC payloads and collection batches have separate contract-level limits and deadlines. These controls bound accidental resource exhaustion but do not make administrator-approved binaries safe to treat as hostile code.
+
 For a running desired state, the Agent verifies plugin identity, validates and applies the full configuration, then waits for the exact generation and configuration digest to become healthy before committing. A failed transition restores the last successful running revision. Unexpected process exits trigger bounded exponential restart, while a full Agent restart reconstructs the last committed running state before new commands execute. Terminal and crash states enter the durable event queue as `plugin.status` events.
 
 ## Local Checks
