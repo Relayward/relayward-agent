@@ -205,7 +205,6 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 
 	executable, err := supervisor.installer.fetch(ctx, desired)
 	if err != nil {
-		supervisor.emitFailed(desired.PluginID, desired.Generation, desired.Version, desired.ConfigurationSHA256, 0, "plugin artifact download or verification failed")
 		return pluginFailure(protocol.ErrorUnavailable, "plugin artifact download or verification failed", true)
 	}
 	if err := supervisor.detachAndStop(ctx, actor); err != nil {
@@ -213,12 +212,11 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 	}
 	candidate, client, err := supervisor.runtime.start(ctx, desired.PluginID, desired.Version, executable)
 	if err != nil {
-		supervisor.rollback(actor, desired.PluginID, previous)
 		if errors.Is(err, ErrPluginIdentityMismatch) {
-			supervisor.emitFailed(desired.PluginID, desired.Generation, desired.Version, desired.ConfigurationSHA256, 0, "plugin artifact identity validation failed")
+			supervisor.rollback(actor, desired.PluginID, previous)
 			return pluginFailure(protocol.ErrorInvalidArgument, "plugin artifact identity validation failed", false)
 		}
-		supervisor.emitFailed(desired.PluginID, desired.Generation, desired.Version, desired.ConfigurationSHA256, 0, "plugin process failed to start")
+		supervisor.rollback(actor, desired.PluginID, previous)
 		return pluginFailure(protocol.ErrorUnavailable, "plugin process failed to start", true)
 	}
 	if err := client.validate(ctx, desired); err != nil {
@@ -228,7 +226,6 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 			return pluginFailure(protocol.ErrorUnavailable, "failed candidate process did not stop", true)
 		}
 		supervisor.rollback(actor, desired.PluginID, previous)
-		supervisor.emitFailed(desired.PluginID, desired.Generation, desired.Version, desired.ConfigurationSHA256, 0, "plugin configuration validation failed")
 		if errors.Is(err, ErrConfigurationRejected) {
 			return pluginFailure(protocol.ErrorInvalidArgument, "plugin configuration validation failed", false)
 		}
@@ -242,7 +239,6 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 				return pluginFailure(protocol.ErrorUnavailable, "failed candidate process did not stop", true)
 			}
 			supervisor.rollback(actor, desired.PluginID, previous)
-			supervisor.emitFailed(desired.PluginID, desired.Generation, desired.Version, desired.ConfigurationSHA256, 0, "plugin configuration application or health check failed")
 			return pluginFailure(protocol.ErrorUnavailable, "plugin configuration application or health check failed", true)
 		}
 	}
@@ -347,19 +343,32 @@ func (supervisor *Supervisor) verifyRevisionArtifact(pluginID string, value revi
 }
 
 func (supervisor *Supervisor) rollback(actor *pluginActor, pluginID string, previous *revision) {
-	if previous == nil || previous.State != agentv1.PluginStateRunning {
+	if previous == nil {
+		return
+	}
+	if previous.State != agentv1.PluginStateRunning {
+		_, restartCount, _ := supervisor.store.current(pluginID)
+		if err := supervisor.emitRevision(pluginID, *previous, restartCount); err != nil {
+			supervisor.logger.Error("queue restored plugin status", "plugin_id", pluginID, "error", err)
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(supervisor.context(), pluginStartupTimeout+pluginRPCTimeout+pluginHealthTimeout)
 	defer cancel()
 	process, err := supervisor.startRevision(ctx, pluginID, *previous)
 	if err != nil {
+		_, restartCount, _ := supervisor.store.current(pluginID)
+		supervisor.emitFailed(pluginID, previous.Generation, previous.Version, previous.ConfigurationSHA256, restartCount, "previous plugin state restoration failed")
 		supervisor.logger.Error("restore previous plugin state", "plugin_id", pluginID, "error", err)
 		go supervisor.retryRecovery(pluginID, actor)
 		return
 	}
 	actor.process = process
 	supervisor.watch(pluginID, actor, process)
+	_, restartCount, _ := supervisor.store.current(pluginID)
+	if err := supervisor.emitRevision(pluginID, *previous, restartCount); err != nil {
+		supervisor.logger.Error("queue restored plugin status", "plugin_id", pluginID, "error", err)
+	}
 }
 
 func (supervisor *Supervisor) detachAndStop(ctx context.Context, actor *pluginActor) error {

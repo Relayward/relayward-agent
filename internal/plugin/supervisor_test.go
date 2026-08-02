@@ -141,6 +141,12 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	if !rolledBack {
 		t.Fatal("previous running process was not restored")
 	}
+	sink.mu.Lock()
+	lastAfterRollback := sink.events[len(sink.events)-1]
+	sink.mu.Unlock()
+	if lastAfterRollback.State != agentv1.PluginStateRunning || lastAfterRollback.Generation != 1 {
+		t.Fatalf("status after rollback = %+v", lastAfterRollback)
+	}
 
 	stopped := testReconcileCommand(3, agentv1.PluginStateStopped, server.URL, int64(len(executable)), hex.EncodeToString(digest[:]), json.RawMessage(`{"enabled":false}`))
 	if execution = executeReconcile(t, supervisor, stopped); execution.Problem != nil {
