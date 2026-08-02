@@ -3,7 +3,7 @@ module github.com/Relayward/relayward-agent
 go 1.26.0
 
 require (
-	github.com/Relayward/relayward-sdk v0.0.0-20260802100927-05c29f428bed
+	github.com/Relayward/relayward-sdk v0.0.0-20260802121112-e72643a95796
 	github.com/gorilla/websocket v1.5.3
 	go.etcd.io/bbolt v1.4.3
 	google.golang.org/grpc v1.83.0
