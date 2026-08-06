@@ -25,6 +25,7 @@ import (
 	"github.com/Relayward/relayward-sdk/protocol"
 
 	"github.com/Relayward/relayward-agent/internal/buildinfo"
+	"github.com/Relayward/relayward-agent/internal/download"
 )
 
 const (
@@ -364,40 +365,6 @@ func (manager *Manager) downloadManifest(ctx context.Context, version string) (M
 }
 
 func (manager *Manager) downloadAndInstall(ctx context.Context, manifest Manifest) (string, error) {
-	temporary, err := os.CreateTemp(manager.stateDirectory, ".relayward-agent-download-*")
-	if err != nil {
-		return "", fmt.Errorf("create Agent release temporary file: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o700); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("protect Agent release temporary file: %w", err)
-	}
-	hasher := sha256.New()
-	written, err := manager.downloadTo(ctx, manager.releaseURL(manifest.Version, manifest.Artifact.File), manifest.Artifact.Size, io.MultiWriter(temporary, hasher))
-	if err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("download Agent release binary: %w", err)
-	}
-	if written != manifest.Artifact.Size || hex.EncodeToString(hasher.Sum(nil)) != manifest.Artifact.SHA256 {
-		temporary.Close()
-		return "", errors.New("Agent release binary does not match its manifest")
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("sync Agent release binary: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return "", fmt.Errorf("close Agent release binary: %w", err)
-	}
-	reportedVersion, err := manager.runCandidateVersion(ctx, temporaryPath)
-	if err != nil {
-		return "", fmt.Errorf("validate Agent release binary: %w", err)
-	}
-	if reportedVersion != manifest.Version {
-		return "", fmt.Errorf("Agent release binary reports version %q instead of %q", reportedVersion, manifest.Version)
-	}
 	versionsDirectory := filepath.Join(manager.stateDirectory, "versions")
 	if err := os.MkdirAll(versionsDirectory, 0o700); err != nil {
 		return "", fmt.Errorf("create Agent versions directory: %w", err)
@@ -419,9 +386,42 @@ func (manager *Manager) downloadAndInstall(ctx context.Context, manifest Manifes
 		if digest != manifest.Artifact.SHA256 {
 			return "", errors.New("existing Agent version target checksum is invalid")
 		}
+		reportedVersion, err := manager.runCandidateVersion(ctx, targetBinary)
+		if err != nil {
+			return "", fmt.Errorf("validate existing Agent release binary: %w", err)
+		}
+		if reportedVersion != manifest.Version {
+			return "", fmt.Errorf("existing Agent release binary reports version %q instead of %q", reportedVersion, manifest.Version)
+		}
+		return filepath.Join("versions", releaseDirectory, "relayward-agent"), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("inspect Agent version target: %w", err)
-	} else if err := os.Rename(temporaryPath, targetBinary); err != nil {
+	}
+	partial := targetBinary + ".partial"
+	if err := download.Fetch(ctx, manager.httpClient, download.Artifact{
+		URL: manager.releaseURL(manifest.Version, manifest.Artifact.File), Path: partial,
+		Size: manifest.Artifact.Size, SHA256: manifest.Artifact.SHA256,
+		Header: http.Header{
+			"Accept":     []string{"application/octet-stream"},
+			"User-Agent": []string{"relayward-agent-update"},
+		},
+		ValidateResponse: func(response *http.Response) error {
+			if !manager.allowInsecure && response.Request.URL.Scheme != "https" {
+				return errors.New("Agent release response did not use HTTPS")
+			}
+			return nil
+		},
+	}); err != nil {
+		return "", fmt.Errorf("download Agent release binary: %w", err)
+	}
+	reportedVersion, err := manager.runCandidateVersion(ctx, partial)
+	if err != nil {
+		return "", fmt.Errorf("validate Agent release binary: %w", err)
+	}
+	if reportedVersion != manifest.Version {
+		return "", fmt.Errorf("Agent release binary reports version %q instead of %q", reportedVersion, manifest.Version)
+	}
+	if err := os.Rename(partial, targetBinary); err != nil {
 		return "", fmt.Errorf("install Agent release binary: %w", err)
 	}
 	if err := syncDirectory(targetDirectory); err != nil {

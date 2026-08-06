@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -88,6 +89,67 @@ func TestInstallerRejectsUnapprovedRedirectBeforeConnecting(t *testing.T) {
 	desired, _ := normalizeDesired(testArtifactCommand(server.URL, int64(len(raw)), hex.EncodeToString(digest[:])))
 	if _, err := value.fetch(context.Background(), desired); err == nil {
 		t.Fatal("fetch() followed an unapproved redirect")
+	}
+}
+
+func TestInstallerRetainsAndResumesPartialArtifact(t *testing.T) {
+	raw := []byte("resumable plugin artifact")
+	firstLength := 8
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if requests == 1 {
+			writer.Header().Set("Content-Length", fmt.Sprint(len(raw)))
+			_, _ = writer.Write(raw[:firstLength])
+			return
+		}
+		if got, want := request.Header.Get("Range"), fmt.Sprintf("bytes=%d-", firstLength); got != want {
+			t.Errorf("Range = %q, want %q", got, want)
+		}
+		writer.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", firstLength, len(raw)-1, len(raw)))
+		writer.Header().Set("Content-Length", fmt.Sprint(len(raw)-firstLength))
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(raw[firstLength:])
+	}))
+	defer server.Close()
+
+	allowed, _ := url.Parse(server.URL)
+	store, err := openStateStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := newInstaller(store, server.Client(), func(candidate *url.URL) error {
+		if candidate.Host != allowed.Host || candidate.Scheme != "https" {
+			return io.EOF
+		}
+		return nil
+	})
+	hash := sha256.Sum256(raw)
+	desired, err := normalizeDesired(testArtifactCommand(server.URL, int64(len(raw)), hex.EncodeToString(hash[:])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := store.releasePath(desired.PluginID, desired.Version, desired.Artifact.SHA256)
+	if _, err := value.fetch(context.Background(), desired); err == nil {
+		t.Fatal("fetch() succeeded after an interrupted response")
+	}
+	partial, err := os.ReadFile(destination + ".partial")
+	if err != nil || string(partial) != string(raw[:firstLength]) {
+		t.Fatalf("partial artifact = %q, error = %v", partial, err)
+	}
+	path, err := value.fetch(context.Background(), desired)
+	if err != nil {
+		t.Fatalf("resumed fetch() error = %v", err)
+	}
+	if path != destination {
+		t.Fatalf("artifact path = %q, want %q", path, destination)
+	}
+	installed, err := os.ReadFile(destination)
+	if err != nil || string(installed) != string(raw) {
+		t.Fatalf("installed artifact = %q, error = %v", installed, err)
+	}
+	if _, err := os.Stat(destination + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf("partial artifact remains after activation: %v", err)
 	}
 }
 

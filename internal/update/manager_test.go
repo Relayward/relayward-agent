@@ -139,6 +139,67 @@ func TestManagerRejectsChecksumAndOversizedManifest(t *testing.T) {
 	}
 }
 
+func TestManagerResumesPartialReleaseBinary(t *testing.T) {
+	binary := []byte("resumable relayward-agent binary")
+	firstLength := 11
+	manifest := testManifest("0.2.0", binary)
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/" + releaseRepository + "/releases/download/v0.2.0/" + ManifestAssetName:
+			_, _ = writer.Write(manifestRaw)
+		case "/" + releaseRepository + "/releases/download/v0.2.0/" + BinaryAssetName:
+			binaryRequests++
+			if binaryRequests == 1 {
+				writer.Header().Set("Content-Length", fmt.Sprint(len(binary)))
+				_, _ = writer.Write(binary[:firstLength])
+				return
+			}
+			if got, want := request.Header.Get("Range"), fmt.Sprintf("bytes=%d-", firstLength); got != want {
+				t.Errorf("Range = %q, want %q", got, want)
+			}
+			writer.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", firstLength, len(binary)-1, len(binary)))
+			writer.Header().Set("Content-Length", fmt.Sprint(len(binary)-firstLength))
+			writer.WriteHeader(http.StatusPartialContent)
+			_, _ = writer.Write(binary[firstLength:])
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	stateDirectory, marker := setupManagedState(t, testRuntimeAssetsDigest)
+	manager, err := newManager(stateDirectory, marker, server.URL, releaseRepository, true, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.runCandidateVersion = func(context.Context, string) (string, error) { return manifest.Version, nil }
+	if _, err := manager.Prepare(context.Background(), "command-1", manifest.Version, "0.1.0"); err == nil {
+		t.Fatal("Prepare() succeeded after an interrupted response")
+	}
+	releaseDirectory := manifest.Version + "-" + manifest.Artifact.SHA256
+	target := filepath.Join(stateDirectory, "versions", releaseDirectory, "relayward-agent")
+	partial, err := os.ReadFile(target + ".partial")
+	if err != nil || string(partial) != string(binary[:firstLength]) {
+		t.Fatalf("partial Agent binary = %q, error = %v", partial, err)
+	}
+	prepared, err := manager.Prepare(context.Background(), "command-2", manifest.Version, "0.1.0")
+	if err != nil || !prepared.Restart {
+		t.Fatalf("resumed Prepare() = %+v, %v", prepared, err)
+	}
+	installed, err := os.ReadFile(target)
+	if err != nil || string(installed) != string(binary) {
+		t.Fatalf("installed Agent binary = %q, error = %v", installed, err)
+	}
+	if _, err := os.Stat(target + ".partial"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial Agent binary remains after activation: %v", err)
+	}
+}
+
 func TestManagerDetectsFailedAndConflictingDurableState(t *testing.T) {
 	manager, stateDirectory := testReleaseManager(t, "0.2.0", []byte("candidate"))
 	if _, err := manager.Prepare(context.Background(), "command-1", "0.2.0", "0.1.0"); err != nil {

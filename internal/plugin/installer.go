@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Relayward/relayward-agent/internal/download"
 )
 
 const maximumRedirects = 10
@@ -90,58 +92,20 @@ func (value *installer) fetch(ctx context.Context, desired desiredState) (string
 		}
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, desired.DownloadURL, nil)
-	if err != nil {
-		return "", errors.New("create plugin artifact request")
-	}
-	request.Header.Set("Accept", "application/octet-stream")
-	response, err := value.httpClient.Do(request)
-	if err != nil {
+	partial := destination + ".partial"
+	if err := download.Fetch(ctx, value.httpClient, download.Artifact{
+		URL: desired.DownloadURL, Path: partial, Size: desired.Artifact.Size, SHA256: desired.Artifact.SHA256,
+		Header: http.Header{"Accept": []string{"application/octet-stream"}},
+		ValidateResponse: func(response *http.Response) error {
+			if err := value.validate(response.Request.URL); err != nil {
+				return errors.New("plugin artifact response URL is not allowed")
+			}
+			return nil
+		},
+	}); err != nil {
 		return "", fmt.Errorf("download plugin artifact: %w", err)
 	}
-	defer response.Body.Close()
-	if err := value.validate(response.Request.URL); err != nil {
-		return "", errors.New("plugin artifact response URL is not allowed")
-	}
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("plugin artifact endpoint returned HTTP %d", response.StatusCode)
-	}
-	if response.ContentLength >= 0 && response.ContentLength != desired.Artifact.Size {
-		return "", errors.New("plugin artifact content length does not match")
-	}
-
-	temporary, err := os.CreateTemp(directory, ".artifact-*")
-	if err != nil {
-		return "", fmt.Errorf("create plugin artifact temporary file: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o700); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("protect plugin artifact temporary file: %w", err)
-	}
-	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(response.Body, desired.Artifact.Size+1))
-	if copyErr != nil {
-		temporary.Close()
-		return "", errors.New("read plugin artifact")
-	}
-	if written != desired.Artifact.Size {
-		temporary.Close()
-		return "", errors.New("plugin artifact size does not match")
-	}
-	if actual := hex.EncodeToString(hash.Sum(nil)); actual != desired.Artifact.SHA256 {
-		temporary.Close()
-		return "", errors.New("plugin artifact SHA-256 does not match")
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("sync plugin artifact: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return "", fmt.Errorf("close plugin artifact: %w", err)
-	}
-	if err := os.Rename(temporaryPath, destination); err != nil {
+	if err := os.Rename(partial, destination); err != nil {
 		return "", fmt.Errorf("activate immutable plugin artifact: %w", err)
 	}
 	if err := syncDirectory(directory); err != nil {
