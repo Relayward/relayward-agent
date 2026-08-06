@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	pluginStartupTimeout = 15 * time.Second
-	pluginRPCTimeout     = 15 * time.Second
-	pluginHealthTimeout  = 30 * time.Second
-	pluginStopTimeout    = 10 * time.Second
+	pluginStartupTimeout          = 15 * time.Second
+	pluginRPCTimeout              = 15 * time.Second
+	pluginConfigurationRPCTimeout = 5 * time.Minute
+	pluginHealthTimeout           = 30 * time.Second
+	pluginStopTimeout             = 10 * time.Second
 )
 
 var (
@@ -167,7 +168,7 @@ func (client *processClient) close() {
 
 func (client *processClient) validate(ctx context.Context, desired desiredState) error {
 	request := configurationRequest(desired)
-	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	rpcContext, cancel := context.WithTimeout(ctx, pluginConfigurationRPCTimeout)
 	defer cancel()
 	response, err := client.client.ValidateConfiguration(rpcContext, request)
 	if err != nil {
@@ -184,7 +185,7 @@ func (client *processClient) validate(ctx context.Context, desired desiredState)
 
 func (client *processClient) apply(ctx context.Context, desired desiredState) error {
 	request := configurationRequest(desired)
-	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	rpcContext, cancel := context.WithTimeout(ctx, pluginConfigurationRPCTimeout)
 	response, err := client.client.ApplyConfiguration(rpcContext, request)
 	cancel()
 	if err != nil {

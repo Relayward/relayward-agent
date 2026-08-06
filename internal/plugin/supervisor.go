@@ -362,7 +362,7 @@ func (supervisor *Supervisor) rollback(actor *pluginActor, pluginID string, prev
 		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(supervisor.context(), pluginStartupTimeout+pluginRPCTimeout+pluginHealthTimeout)
+	ctx, cancel := context.WithTimeout(supervisor.context(), pluginStartupTimeout+pluginConfigurationRPCTimeout+pluginHealthTimeout)
 	defer cancel()
 	process, err := supervisor.startRevision(ctx, pluginID, *previous)
 	if err != nil {

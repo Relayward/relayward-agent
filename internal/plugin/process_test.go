@@ -47,6 +47,15 @@ func TestProcessRuntimeUsesPrivateEnvironmentAndAppliesConfiguration(t *testing.
 	}
 }
 
+func TestPluginConfigurationTimeoutFitsCommandBudget(t *testing.T) {
+	if pluginConfigurationRPCTimeout <= pluginRPCTimeout {
+		t.Fatalf("configuration RPC timeout = %s, regular RPC timeout = %s", pluginConfigurationRPCTimeout, pluginRPCTimeout)
+	}
+	if pluginConfigurationRPCTimeout >= agentv1.MaximumCommandExecution {
+		t.Fatalf("configuration RPC timeout = %s, command execution limit = %s", pluginConfigurationRPCTimeout, agentv1.MaximumCommandExecution)
+	}
+}
+
 func copyTestExecutable(t *testing.T, directory string) string {
 	t.Helper()
 	source, err := os.Executable()
