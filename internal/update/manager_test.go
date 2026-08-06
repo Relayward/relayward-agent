@@ -15,9 +15,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
 )
 
 const testRuntimeAssetsDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestManagerUsesDedicatedReleaseDownloadTimeout(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.httpClient.Timeout != releaseDownloadTimeout {
+		t.Fatalf("release HTTP timeout = %s, want %s", manager.httpClient.Timeout, releaseDownloadTimeout)
+	}
+	if releaseDownloadTimeout <= HealthTimeout {
+		t.Fatalf("release download timeout = %s, health timeout = %s", releaseDownloadTimeout, HealthTimeout)
+	}
+	if releaseDownloadTimeout >= agentv1.MaximumCommandExecution {
+		t.Fatalf("release download timeout = %s, command execution limit = %s", releaseDownloadTimeout, agentv1.MaximumCommandExecution)
+	}
+}
 
 func TestManagerPreparesConfirmsAndReusesImmutableRelease(t *testing.T) {
 	binary := []byte("relayward-agent-v0.2.0")

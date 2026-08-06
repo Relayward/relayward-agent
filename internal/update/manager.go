@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	MaximumManifestBytes = 64 << 10
-	MaximumBinaryBytes   = 64 << 20
-	HealthTimeout        = 2 * time.Minute
-	retainedVersions     = 3
+	MaximumManifestBytes   = 64 << 10
+	MaximumBinaryBytes     = 64 << 20
+	HealthTimeout          = 2 * time.Minute
+	releaseDownloadTimeout = 5 * time.Minute
+	retainedVersions       = 3
 
 	releaseBaseURL          = "https://github.com"
 	releaseRepository       = "Relayward/relayward-agent"
@@ -89,7 +90,7 @@ func NewManager(stateDirectory string) (*Manager, error) {
 	}
 	return newManager(stateDirectory, runtimeAssetsMarkerPath, releaseBaseURL, releaseRepository, false, &http.Client{
 		Transport: transport,
-		Timeout:   2 * time.Minute,
+		Timeout:   releaseDownloadTimeout,
 		CheckRedirect: func(request *http.Request, previous []*http.Request) error {
 			if len(previous) >= 10 {
 				return errors.New("too many Agent release redirects")
