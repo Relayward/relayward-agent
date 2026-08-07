@@ -22,7 +22,7 @@ Usage: install.sh --server-url URL [options]
 Options:
   --version VERSION              Semantic release version (default: latest)
   --server-cert-sha256 DIGEST    Pin the center certificate SHA-256
-  --allow-insecure               Allow plain HTTP; intended only for tests
+  --allow-insecure               Allow unencrypted HTTP connections to the center
   --archive PATH                 Install a local release archive
   --checksums PATH               SHA256SUMS for a local archive
   --help                         Show this help

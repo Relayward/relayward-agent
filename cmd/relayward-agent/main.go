@@ -80,7 +80,7 @@ func initializeConfig(args []string, stderr io.Writer) int {
 	path := flags.String("config", "/etc/relayward-agent/config.json", "configuration path")
 	serverURL := flags.String("server-url", "", "Relayward center URL")
 	stateDirectory := flags.String("state-directory", "/var/lib/relayward-agent", "state directory")
-	allowInsecure := flags.Bool("allow-insecure", false, "allow plain HTTP for local tests")
+	allowInsecure := flags.Bool("allow-insecure", false, "allow unencrypted HTTP connections to the center")
 	certificatePin := flags.String("server-cert-sha256", "", "center certificate SHA-256")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2

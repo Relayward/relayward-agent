@@ -16,7 +16,7 @@ func TestNormalize(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "HTTPS", value: Config{ServerURL: " https://center.example/ ", StateDirectory: state}},
-		{name: "local HTTP", value: Config{ServerURL: "http://127.0.0.1:8080", StateDirectory: state, AllowInsecure: true}},
+		{name: "public HTTP", value: Config{ServerURL: "http://center.example:8080", StateDirectory: state, AllowInsecure: true}},
 		{name: "certificate pin", value: Config{ServerURL: "https://center.example", StateDirectory: state, ServerCertSHA256: validPin}},
 		{name: "HTTP without opt-in", value: Config{ServerURL: "http://center.example", StateDirectory: state}, wantErr: true},
 		{name: "HTTP certificate pin", value: Config{ServerURL: "http://center.example", StateDirectory: state, AllowInsecure: true, ServerCertSHA256: strings.Repeat("ab", 32)}, wantErr: true},

@@ -102,10 +102,10 @@ func Normalize(value Config) (Config, error) {
 	case "https":
 	case "http":
 		if !value.AllowInsecure {
-			return Config{}, errors.New("server_url must use HTTPS")
+			return Config{}, errors.New("plain HTTP server_url requires allow_insecure")
 		}
 	default:
-		return Config{}, errors.New("server_url must use HTTPS")
+		return Config{}, errors.New("server_url must use HTTP or HTTPS")
 	}
 	parsed.Path = ""
 	value.ServerURL = strings.TrimSuffix(parsed.String(), "/")
