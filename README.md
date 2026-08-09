@@ -63,7 +63,7 @@ data/        plugin-owned persistent data
 runtime/     private runtime directories and Unix sockets
 ```
 
-Each artifact runs as a separate process under the Agent service account and service sandbox. It receives only a minimal environment and communicates through the versioned SDK gRPC API on an Agent-owned Unix socket. Standard output and standard error are not copied into Agent informational logs.
+Each artifact runs as a separate process under the Agent service account and service sandbox. The init service grants only `CAP_NET_BIND_SERVICE` as an effective and ambient capability so approved runtime plugins can bind standard ports without running as root. It receives only a minimal environment and communicates through the versioned SDK gRPC API on an Agent-owned Unix socket. Standard output and standard error are not copied into Agent informational logs.
 
 Each node plugin process receives hard limits of 1 GiB writable memory and 65,536 open files, with core dumps disabled. The 256-process limit is shared by processes running under the restricted `relayward-agent` account. RPC payloads and collection batches have separate contract-level limits and deadlines. These controls bound accidental resource exhaustion but do not make administrator-approved binaries safe to treat as hostile code.
 

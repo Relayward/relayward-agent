@@ -7,6 +7,7 @@ description="Relayward node agent"
 command="/usr/local/libexec/relayward-agent-launcher"
 command_user="relayward-agent:relayward-agent"
 supervisor="supervise-daemon"
+supervise_daemon_args="--capabilities ^cap_net_bind_service"
 respawn_delay=5
 respawn_max=0
 umask=0077

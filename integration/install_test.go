@@ -189,6 +189,7 @@ func testInstallation(t *testing.T, system initSystem, releaseDirectory, release
 	install(t, container, releaseVersion, center.port, firstRegistrationToken, true)
 	eventually(t, 15*time.Second, func() bool { return center.sessions.Load() > sessions })
 	assertServiceState(t, container, system)
+	assertServiceSecurity(t, container)
 	assertPathState(t, container)
 	firstPID := commandOutput(t, append([]string{"exec", container}, system.mainPID...)...)
 
@@ -237,6 +238,32 @@ func assertServiceState(t *testing.T, container string, system initSystem) {
 	output := commandOutput(t, append([]string{"exec", container}, system.status...)...)
 	if system.name == "systemd" && output != "active" {
 		t.Fatalf("systemd service state = %q", output)
+	}
+}
+
+func assertServiceSecurity(t *testing.T, container string) {
+	t.Helper()
+	pid := commandOutput(t, "exec", container, "pidof", "relayward-agent")
+	if pid == "" || strings.Contains(pid, " ") {
+		t.Fatalf("unexpected Agent process IDs: %q", pid)
+	}
+	status := commandOutput(t, "exec", container, "cat", "/proc/"+pid+"/status")
+	fields := make(map[string]string)
+	for _, line := range strings.Split(status, "\n") {
+		name, value, found := strings.Cut(line, ":")
+		if found {
+			fields[name] = strings.TrimSpace(value)
+		}
+	}
+	const netBindService = uint64(1 << 10)
+	for _, name := range []string{"CapEff", "CapAmb"} {
+		value, err := strconv.ParseUint(fields[name], 16, 64)
+		if err != nil || value != netBindService {
+			t.Fatalf("%s = %q, want only CAP_NET_BIND_SERVICE", name, fields[name])
+		}
+	}
+	if fields["NoNewPrivs"] != "1" {
+		t.Fatalf("NoNewPrivs = %q, want 1", fields["NoNewPrivs"])
 	}
 }
 
