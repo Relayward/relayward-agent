@@ -102,7 +102,7 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 			return nil, fmt.Errorf("initialize Agent updates: %w", err)
 		}
 		updates = manager
-		plugins, err = plugin.NewSupervisor(normalized.StateDirectory, logger)
+		plugins, err = plugin.NewSupervisor(normalized.StateDirectory, normalized.ServerURL, logger)
 		if err != nil {
 			return nil, fmt.Errorf("initialize plugin supervisor: %w", err)
 		}

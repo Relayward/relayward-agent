@@ -179,6 +179,42 @@ func TestGitHubArtifactURLAllowlist(t *testing.T) {
 	}
 }
 
+func TestPluginArtifactURLAllowlistIncludesConfiguredHTTPSCenter(t *testing.T) {
+	validate, err := newArtifactURLValidator("https://center.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		"https://center.example.com/development-artifacts/plugin/version/node",
+		"https://github.com/Relayward/plugin/releases/download/v1/plugin",
+	} {
+		parsed, _ := url.Parse(raw)
+		if err := validate(parsed); err != nil {
+			t.Errorf("validate(%q) error = %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://center.example.com/development-artifacts/plugin/version/node",
+		"https://center.example.com:8443/development-artifacts/plugin/version/node",
+		"https://center.example.com.evil.invalid/development-artifacts/plugin/version/node",
+		"https://other.example.com/development-artifacts/plugin/version/node",
+	} {
+		parsed, _ := url.Parse(raw)
+		if err := validate(parsed); err == nil {
+			t.Errorf("validate(%q) succeeded", raw)
+		}
+	}
+
+	insecure, err := newArtifactURLValidator("http://center.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse("http://center.example.com/development-artifacts/plugin/version/node")
+	if err := insecure(parsed); err == nil {
+		t.Fatal("HTTP center was allowed as a plugin artifact source")
+	}
+}
+
 func testArtifactCommand(downloadURL string, size int64, digest string) agentv1.PluginReconcileCommand {
 	return agentv1.PluginReconcileCommand{
 		PluginID: "io.relayward.test", Generation: 1, DesiredState: agentv1.PluginStateRunning,

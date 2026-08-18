@@ -50,7 +50,7 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	serverURL, _ := url.Parse(server.URL)
 
 	stateDirectory := shortTempDir(t)
-	supervisor, err := NewSupervisor(stateDirectory, nil)
+	supervisor, err := NewSupervisor(stateDirectory, "https://center.example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	}
 	closeCancel()
 	cancel()
-	supervisor, err = NewSupervisor(stateDirectory, nil)
+	supervisor, err = NewSupervisor(stateDirectory, "https://center.example.com", nil)
 	if err != nil {
 		t.Fatalf("reopen supervisor: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestSupervisorRestartsPluginAfterRepeatedUnhealthyStatus(t *testing.T) {
 	}))
 	defer server.Close()
 	serverURL, _ := url.Parse(server.URL)
-	supervisor, err := NewSupervisor(shortTempDir(t), nil)
+	supervisor, err := NewSupervisor(shortTempDir(t), "https://center.example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

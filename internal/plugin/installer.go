@@ -152,3 +152,26 @@ func validateGitHubArtifactURL(value *url.URL) error {
 		return errors.New("artifact URL host is not a GitHub release host")
 	}
 }
+
+func newArtifactURLValidator(centerURL string) (hostValidator, error) {
+	center, err := url.Parse(centerURL)
+	if err != nil || center.Hostname() == "" || center.User != nil {
+		return nil, errors.New("center URL is invalid for plugin artifact validation")
+	}
+	centerOrigin := strings.ToLower(center.Scheme + "://" + center.Host)
+	return func(value *url.URL) error {
+		if validateGitHubArtifactURL(value) == nil {
+			return nil
+		}
+		if value == nil || value.Scheme != "https" || value.User != nil || value.Fragment != "" || value.Hostname() == "" {
+			return errors.New("plugin artifact URL must be HTTPS without credentials or a fragment")
+		}
+		if port := value.Port(); port != "" && port != "443" {
+			return errors.New("plugin artifact URL must use the HTTPS default port")
+		}
+		if center.Scheme != "https" || strings.ToLower(value.Scheme+"://"+value.Host) != centerOrigin {
+			return errors.New("plugin artifact URL host is not GitHub or the configured center")
+		}
+		return nil
+	}, nil
+}

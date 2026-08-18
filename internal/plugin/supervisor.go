@@ -51,8 +51,12 @@ type Supervisor struct {
 	stopping     bool
 }
 
-func NewSupervisor(stateDirectory string, logger *slog.Logger) (*Supervisor, error) {
+func NewSupervisor(stateDirectory, centerURL string, logger *slog.Logger) (*Supervisor, error) {
 	store, err := openStateStore(stateDirectory)
+	if err != nil {
+		return nil, err
+	}
+	validateArtifactURL, err := newArtifactURLValidator(centerURL)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +64,7 @@ func NewSupervisor(stateDirectory string, logger *slog.Logger) (*Supervisor, err
 		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return &Supervisor{
-		store: store, installer: newInstaller(store, nil, nil), runtime: &processRuntime{store: store},
+		store: store, installer: newInstaller(store, nil, validateArtifactURL), runtime: &processRuntime{store: store},
 		logger: logger, healthCheckInterval: defaultHealthCheckInterval, actors: make(map[string]*pluginActor),
 		capabilities: make(map[string][]string),
 	}, nil
