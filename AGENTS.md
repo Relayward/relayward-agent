@@ -29,7 +29,9 @@ The Agent must not contain proxy-core-specific configuration or lifecycle logic.
 
 ## Validation
 
-Run the checks relevant to the change:
+Full validation runs in GitHub Actions. The local development host is resource constrained, so default local validation to `git diff --check`, formatting or syntax checks, and small tests that directly cover the changed code. Do not routinely run full suites, race tests, release builds, or installation matrices locally unless they are needed to diagnose a failure or the user explicitly requests them.
+
+GitHub Actions must cover the checks relevant to the change:
 
 - `go test ./...`
 - `go vet ./...`
@@ -37,3 +39,5 @@ Run the checks relevant to the change:
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/relayward-agent`
 
 Changes involving shared contracts must also pass the SDK conformance tests and affected control-plane tests.
+
+Pushing still requires explicit user confirmation. After an approved push, monitor every triggered workflow to completion; before that, report the commit as CI pending.
