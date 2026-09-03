@@ -2,8 +2,6 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -11,6 +9,7 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+  workflow_dispatch:
 
 permissions:
   contents: read
