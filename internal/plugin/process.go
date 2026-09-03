@@ -31,6 +31,7 @@ const (
 
 var (
 	ErrConfigurationRejected  = errors.New("plugin configuration rejected")
+	ErrDiagnosticRejected     = errors.New("plugin diagnostic request rejected")
 	ErrPluginIdentityMismatch = errors.New("plugin identity does not match the artifact metadata")
 )
 
@@ -51,6 +52,9 @@ type processClient struct {
 	capabilities      []string
 	telemetryStreamID string
 	closeOnce         sync.Once
+	statusMu          sync.Mutex
+	listeners         []*nodepluginv1.ListenerStatus
+	listenersObserved time.Time
 }
 
 type processRuntime struct {
@@ -220,6 +224,25 @@ func (client *processClient) apply(ctx context.Context, desired desiredState) er
 	}
 }
 
+func (client *processClient) diagnose(ctx context.Context, request *nodepluginv1.DiagnoseRequest) (*nodepluginv1.DiagnoseResponse, error) {
+	if err := nodepluginv1.ValidateDiagnoseRequest(request); err != nil {
+		return nil, fmt.Errorf("validate plugin diagnostic request: %w", err)
+	}
+	rpcContext, cancel := context.WithTimeout(ctx, pluginRPCTimeout)
+	defer cancel()
+	response, err := client.client.Diagnose(rpcContext, request)
+	if err != nil {
+		if status.Code(err) == codes.InvalidArgument {
+			return nil, ErrDiagnosticRejected
+		}
+		return nil, errors.New("plugin diagnostic RPC failed")
+	}
+	if err := nodepluginv1.ValidateDiagnoseResponse(request, response); err != nil {
+		return nil, fmt.Errorf("validate plugin diagnostic response: %w", err)
+	}
+	return response, nil
+}
+
 func (client *processClient) checkHealthy(ctx context.Context, generation uint64, digest string) error {
 	status, err := client.getStatus(ctx)
 	if err != nil {
@@ -244,7 +267,39 @@ func (client *processClient) getStatus(ctx context.Context) (*nodepluginv1.GetSt
 	if err := nodepluginv1.ValidateStatusResponse(status); err != nil {
 		return nil, fmt.Errorf("validate plugin health response: %w", err)
 	}
+	hasListeners := nodepluginv1.HasCapability(client.capabilities, nodepluginv1.CapabilityListenerStatus)
+	if !hasListeners && len(status.Listeners) != 0 {
+		return nil, errors.New("plugin reported listeners without the network.listeners capability")
+	}
+	client.statusMu.Lock()
+	if hasListeners {
+		client.listeners = cloneListenerStatuses(status.Listeners)
+		client.listenersObserved = time.Now().UTC()
+	} else {
+		client.listeners = nil
+		client.listenersObserved = time.Time{}
+	}
+	client.statusMu.Unlock()
 	return status, nil
+}
+
+func (client *processClient) listenerSnapshot() ([]*nodepluginv1.ListenerStatus, time.Time) {
+	client.statusMu.Lock()
+	defer client.statusMu.Unlock()
+	return cloneListenerStatuses(client.listeners), client.listenersObserved
+}
+
+func cloneListenerStatuses(values []*nodepluginv1.ListenerStatus) []*nodepluginv1.ListenerStatus {
+	result := make([]*nodepluginv1.ListenerStatus, len(values))
+	for index, value := range values {
+		if value != nil {
+			result[index] = &nodepluginv1.ListenerStatus{
+				ServiceId: value.ServiceId, Network: value.Network, ListenAddress: value.ListenAddress,
+				Port: value.Port, State: value.State,
+			}
+		}
+	}
+	return result
 }
 
 func (client *processClient) collectTelemetry(ctx context.Context, afterSequence uint64) (*nodepluginv1.CollectTelemetryResponse, error) {

@@ -151,10 +151,18 @@ func (supervisor *Supervisor) Close(ctx context.Context) error {
 	return result
 }
 
-func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command agentv1.Command) commandstate.Execution {
-	if command.Kind != agentv1.CommandPluginReconcile {
-		return commandstate.UnsupportedExecutor{}.Execute(ctx, "", command)
+func (supervisor *Supervisor) Execute(ctx context.Context, commandID string, command agentv1.Command) commandstate.Execution {
+	switch command.Kind {
+	case agentv1.CommandPluginReconcile:
+		return supervisor.executeReconcile(ctx, command)
+	case agentv1.CommandPluginDiagnose:
+		return supervisor.executeDiagnose(ctx, command)
+	default:
+		return commandstate.UnsupportedExecutor{}.Execute(ctx, commandID, command)
 	}
+}
+
+func (supervisor *Supervisor) executeReconcile(ctx context.Context, command agentv1.Command) commandstate.Execution {
 	request, err := agentv1.DecodePluginReconcileCommand(command)
 	if err != nil {
 		return pluginFailure(protocol.ErrorInvalidArgument, "invalid plugin reconcile command", false)
@@ -283,6 +291,41 @@ func (supervisor *Supervisor) Execute(ctx context.Context, _ string, command age
 		supervisor.logger.Error("prune plugin releases", "plugin_id", desired.PluginID, "error", err)
 	}
 	return supervisor.success(desired)
+}
+
+func (supervisor *Supervisor) executeDiagnose(ctx context.Context, command agentv1.Command) commandstate.Execution {
+	request, err := agentv1.DecodePluginDiagnoseCommand(command)
+	if err != nil {
+		return pluginFailure(protocol.ErrorInvalidArgument, "invalid plugin diagnose command", false)
+	}
+	if !supervisor.isRunning() {
+		return pluginFailure(protocol.ErrorUnavailable, "plugin supervisor is not running", true)
+	}
+	actor := supervisor.actor(request.PluginID)
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if !supervisor.isRunning() {
+		return pluginFailure(protocol.ErrorUnavailable, "plugin supervisor is stopping", true)
+	}
+	process := actor.process
+	if process == nil || !process.ready || process.exited() {
+		return pluginFailure(protocol.ErrorUnavailable, "plugin is not running", true)
+	}
+	if !nodepluginv1.HasCapability(process.client.capabilities, nodepluginv1.CapabilityDiagnostics) {
+		return pluginFailure(protocol.ErrorUnsupported, "plugin does not support diagnostics", false)
+	}
+	response, err := process.client.diagnose(ctx, &nodepluginv1.DiagnoseRequest{Name: request.Name, Json: request.JSON})
+	if err != nil {
+		if errors.Is(err, ErrDiagnosticRejected) {
+			return pluginFailure(protocol.ErrorInvalidArgument, "plugin rejected the diagnostic request", false)
+		}
+		return pluginFailure(protocol.ErrorUnavailable, "plugin diagnostic RPC failed", true)
+	}
+	output, err := agentv1.EncodePluginDiagnoseOutput(agentv1.PluginDiagnoseOutput{JSON: response.Json})
+	if err != nil {
+		return pluginFailure(protocol.ErrorInternal, "encode plugin diagnostic result", false)
+	}
+	return commandstate.Execution{Output: output}
 }
 
 func (supervisor *Supervisor) ensureCurrent(ctx context.Context, actor *pluginActor, desired desiredState, current *revision) error {
@@ -632,6 +675,45 @@ func (supervisor *Supervisor) RunningPlugins() []RuntimeInfo {
 				Capabilities: append([]string(nil), process.client.capabilities...), TelemetryStreamID: process.client.telemetryStreamID})
 		}
 		actor.mu.Unlock()
+	}
+	return values
+}
+
+func (supervisor *Supervisor) ListenerStatuses() []agentv1.PluginListenerStatus {
+	supervisor.mu.Lock()
+	pluginIDs := make([]string, 0, len(supervisor.actors))
+	for pluginID := range supervisor.actors {
+		pluginIDs = append(pluginIDs, pluginID)
+	}
+	supervisor.mu.Unlock()
+	sort.Strings(pluginIDs)
+	values := make([]agentv1.PluginListenerStatus, 0)
+	for _, pluginID := range pluginIDs {
+		actor := supervisor.actor(pluginID)
+		actor.mu.Lock()
+		process := actor.process
+		if process == nil || !process.ready || process.exited() {
+			actor.mu.Unlock()
+			continue
+		}
+		listeners, observedAt := process.client.listenerSnapshot()
+		actor.mu.Unlock()
+		for _, listener := range listeners {
+			if listener == nil {
+				continue
+			}
+			state := agentv1.ListenerStateUnknown
+			switch listener.State {
+			case nodepluginv1.ListenerState_LISTENER_STATE_LISTENING:
+				state = agentv1.ListenerStateListening
+			case nodepluginv1.ListenerState_LISTENER_STATE_NOT_LISTENING:
+				state = agentv1.ListenerStateNotListening
+			}
+			values = append(values, agentv1.PluginListenerStatus{
+				PluginID: pluginID, ServiceID: listener.ServiceId, Network: listener.Network,
+				ListenAddress: listener.ListenAddress, Port: listener.Port, State: state, ObservedAt: observedAt,
+			})
+		}
 	}
 	return values
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agentv1 "github.com/Relayward/relayward-sdk/agent/v1"
+	nodepluginv1 "github.com/Relayward/relayward-sdk/nodeplugin/v1"
 )
 
 func TestProcessRuntimeUsesPrivateEnvironmentAndAppliesConfiguration(t *testing.T) {
@@ -34,6 +35,10 @@ func TestProcessRuntimeUsesPrivateEnvironmentAndAppliesConfiguration(t *testing.
 	}
 	if err := client.apply(ctx, desired); err != nil {
 		t.Fatalf("apply() error = %v", err)
+	}
+	diagnostic, err := client.diagnose(ctx, &nodepluginv1.DiagnoseRequest{Name: "network.addresses", Json: []byte(`{}`)})
+	if err != nil || string(diagnostic.Json) != `{"ok":true}` {
+		t.Fatalf("diagnose() response = %+v, error = %v", diagnostic, err)
 	}
 	client.close()
 	info, err := os.Stat(process.socketPath)

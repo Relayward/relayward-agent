@@ -48,6 +48,8 @@ Accepted commands and terminal results are stored as owner-only JSON files under
 
 Events are stored in the owner-only `/var/lib/relayward-agent/events.db` queue with 64 MiB and 100,000-event default limits. The Agent uploads independent gzip batches over the configured center connection and removes only the highest contiguous range acknowledged by the center.
 
+The Agent queries `https://api4.ipify.org` and `https://api6.ipify.org` at startup and every 10 minutes to observe the node's public addresses for Relayward subscription endpoints and managed DDNS. IPv4 and IPv6 are independent: a failed family does not block the other family or any control-plane work. Successful observations enter the same durable event queue before upload.
+
 ## Node Plugin Supervision
 
 The Agent advertises `plugin.supervision` and accepts full `plugin.reconcile` desired states through the existing durable command queue. Desired generations are monotonic per plugin. Replaying the same generation and content is idempotent; stale or conflicting generations are rejected.

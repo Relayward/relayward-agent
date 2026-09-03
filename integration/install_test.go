@@ -189,7 +189,7 @@ func testInstallation(t *testing.T, system initSystem, releaseDirectory, release
 	install(t, container, releaseVersion, center.port, firstRegistrationToken, true)
 	eventually(t, 15*time.Second, func() bool { return center.sessions.Load() > sessions })
 	assertServiceState(t, container, system)
-	assertServiceSecurity(t, container)
+	assertServiceSecurity(t, container, system)
 	assertPathState(t, container)
 	firstPID := commandOutput(t, append([]string{"exec", container}, system.mainPID...)...)
 
@@ -241,8 +241,16 @@ func assertServiceState(t *testing.T, container string, system initSystem) {
 	}
 }
 
-func assertServiceSecurity(t *testing.T, container string) {
+func assertServiceSecurity(t *testing.T, container string, system initSystem) {
 	t.Helper()
+	if system.name == "systemd" {
+		families := commandOutput(t, "exec", container, "systemctl", "show", "relayward-agent.service", "-p", "RestrictAddressFamilies", "--value")
+		for _, family := range []string{"AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"} {
+			if !strings.Contains(" "+families+" ", " "+family+" ") {
+				t.Fatalf("RestrictAddressFamilies = %q, missing %s", families, family)
+			}
+		}
+	}
 	pid := commandOutput(t, "exec", container, "pidof", "relayward-agent")
 	if pid == "" || strings.Contains(pid, " ") {
 		t.Fatalf("unexpected Agent process IDs: %q", pid)

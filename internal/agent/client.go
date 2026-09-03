@@ -31,6 +31,7 @@ import (
 	"github.com/Relayward/relayward-agent/internal/config"
 	"github.com/Relayward/relayward-agent/internal/eventqueue"
 	"github.com/Relayward/relayward-agent/internal/identity"
+	"github.com/Relayward/relayward-agent/internal/networkobserver"
 	"github.com/Relayward/relayward-agent/internal/plugin"
 	localpolicy "github.com/Relayward/relayward-agent/internal/policy"
 	"github.com/Relayward/relayward-agent/internal/update"
@@ -113,6 +114,7 @@ func newClient(value config.Config, version string, logger *slog.Logger, executo
 		executor = commandstate.Router{
 			agentv1.CommandAgentUpdate:     update.NewExecutor(manager, version),
 			agentv1.CommandPluginReconcile: plugins,
+			agentv1.CommandPluginDiagnose:  plugins,
 			agentv1.CommandPolicyReconcile: policies,
 		}
 	}
@@ -180,20 +182,29 @@ func (client *Client) Run(ctx context.Context) error {
 		endpoint: client.httpURL("/api/v1/agent/events/" + current.NodeID), credential: current.Credential,
 		httpClient: client.httpClient, queue: events,
 	}
-	workerFailure := make(chan error, 4)
+	publicAddresses, err := networkobserver.New(events, client.logger)
+	if err != nil {
+		stopWorkers()
+		return fmt.Errorf("initialize public address observer: %w", err)
+	}
+	workerFailure := make(chan error, 1)
 	var workers sync.WaitGroup
 	startWorker := func(name string, run func(context.Context) error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			if err := run(workerContext); err != nil {
-				workerFailure <- fmt.Errorf("%s: %w", name, err)
+				select {
+				case workerFailure <- fmt.Errorf("%s: %w", name, err):
+				default:
+				}
 				stopWorkers()
 			}
 		}()
 	}
 	startWorker("command processor", client.commands.Run)
 	startWorker("event uploader", uploader.Run)
+	startWorker("public address observer", publicAddresses.Run)
 	if client.policies != nil {
 		startWorker("local policy engine", client.policies.Run)
 	}
@@ -384,8 +395,12 @@ func (client *Client) runSession(ctx context.Context, current identity.Identity)
 			case <-timer.C:
 			}
 		}
+		listeners := []agentv1.PluginListenerStatus(nil)
+		if client.plugins != nil {
+			listeners = client.plugins.ListenerStatuses()
+		}
 		heartbeat, err := agentv1.NewEnvelope(agentv1.MessageAgentHeartbeat, agentv1.Heartbeat{
-			SessionID: centerHello.SessionID, AgentVersion: client.version, ObservedAt: client.now(),
+			SessionID: centerHello.SessionID, AgentVersion: client.version, ObservedAt: client.now(), PluginListeners: listeners,
 		})
 		if err != nil {
 			return stable, err

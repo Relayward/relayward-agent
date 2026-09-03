@@ -86,8 +86,23 @@ func TestSupervisorReconcilesRunningRollbackStoppedAndAbsent(t *testing.T) {
 	}
 	runtimes := supervisor.RunningPlugins()
 	if len(runtimes) != 1 || runtimes[0].TelemetryStreamID == "" ||
-		!nodepluginv1.HasCapability(runtimes[0].Capabilities, nodepluginv1.CapabilityDynamicBlocking) {
+		!nodepluginv1.HasCapability(runtimes[0].Capabilities, nodepluginv1.CapabilityDynamicBlocking) ||
+		!nodepluginv1.HasCapability(runtimes[0].Capabilities, nodepluginv1.CapabilityDiagnostics) {
 		t.Fatalf("running plugin capabilities = %+v", runtimes)
+	}
+	diagnosticCommand, err := agentv1.NewPluginDiagnoseCommand(agentv1.PluginDiagnoseCommand{
+		PluginID: running.PluginID, Name: "network.addresses", JSON: json.RawMessage(`{}`),
+	}, time.Now().UTC(), time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnosticExecution := supervisor.Execute(context.Background(), "diagnostic-command", diagnosticCommand)
+	if diagnosticExecution.Problem != nil {
+		t.Fatalf("diagnostic problem = %+v", diagnosticExecution.Problem)
+	}
+	diagnosticOutput, err := agentv1.DecodePluginDiagnoseOutput(diagnosticExecution.Output)
+	if err != nil || string(diagnosticOutput.JSON) != `{"ok":true}` {
+		t.Fatalf("diagnostic output = %+v, error = %v", diagnosticOutput, err)
 	}
 	if _, err := supervisor.CollectTelemetry(context.Background(), running.PluginID, 0); err != nil {
 		t.Fatalf("CollectTelemetry() error = %v", err)
@@ -210,6 +225,34 @@ func TestSupervisorExcludesUncommittedPluginProcessFromRuntimeHost(t *testing.T)
 	}
 	if _, err := supervisor.CollectTelemetry(context.Background(), pluginID, 0); !errors.Is(err, ErrPluginUnavailable) {
 		t.Fatalf("CollectTelemetry() error = %v", err)
+	}
+}
+
+func TestSupervisorReportsCachedListenersOnlyForRunningPlugins(t *testing.T) {
+	pluginID := "io.relayward.contract-test"
+	observedAt := time.Now().UTC()
+	process := &managedProcess{
+		pluginID: pluginID, done: make(chan struct{}), ready: true,
+		client: &processClient{
+			listeners: []*nodepluginv1.ListenerStatus{{
+				ServiceId: "main", Network: "tcp", ListenAddress: "0.0.0.0", Port: 20443,
+				State: nodepluginv1.ListenerState_LISTENER_STATE_LISTENING,
+			}},
+			listenersObserved: observedAt,
+		},
+	}
+	supervisor := &Supervisor{
+		actors:       map[string]*pluginActor{pluginID: {process: process}},
+		capabilities: make(map[string][]string),
+	}
+	listeners := supervisor.ListenerStatuses()
+	if len(listeners) != 1 || listeners[0].PluginID != pluginID || listeners[0].ServiceID != "main" ||
+		listeners[0].State != agentv1.ListenerStateListening || !listeners[0].ObservedAt.Equal(observedAt) {
+		t.Fatalf("ListenerStatuses() = %+v", listeners)
+	}
+	close(process.done)
+	if listeners := supervisor.ListenerStatuses(); len(listeners) != 0 {
+		t.Fatalf("ListenerStatuses() after exit = %+v", listeners)
 	}
 }
 
