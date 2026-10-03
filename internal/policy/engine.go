@@ -147,7 +147,13 @@ func (engine *Engine) runCycle(ctx context.Context) error {
 	return result
 }
 
-func (engine *Engine) collectRuntime(ctx context.Context, runtime plugin.RuntimeInfo) error {
+func (engine *Engine) collectRuntime(ctx context.Context, runtime plugin.RuntimeInfo) (result error) {
+	defer func() {
+		if result != nil && engine.eventSink() != nil {
+			_, err := engine.eventSink().Enqueue(agentv1.EventCollection, engine.now(), agentv1.CollectionEvent{PluginID: runtime.PluginID, Status: "incomplete"})
+			result = errors.Join(result, err)
+		}
+	}()
 	streamID := runtime.TelemetryStreamID
 	hasActivity := nodepluginv1.HasCapability(runtime.Capabilities, nodepluginv1.CapabilityRecentActivity)
 	if hasActivity && streamID == "" {
@@ -165,6 +171,15 @@ func (engine *Engine) collectRuntime(ctx context.Context, runtime plugin.Runtime
 		response, err := engine.runtimes.CollectTelemetry(ctx, runtime.PluginID, cursor)
 		if err != nil {
 			return err
+		}
+		if page == 0 && response.CollectionStatus != "" {
+			sink := engine.eventSink()
+			if sink == nil {
+				return errors.New("policy event sink is not configured")
+			}
+			if _, err := sink.Enqueue(agentv1.EventCollection, engine.now(), agentv1.CollectionEvent{PluginID: runtime.PluginID, Status: response.CollectionStatus}); err != nil {
+				return err
+			}
 		}
 		if nodepluginv1.HasCapability(runtime.Capabilities, nodepluginv1.CapabilityTrafficCounters) {
 			if err := engine.store.ApplyCounters(runtime.PluginID, response.Counters, engine.now()); err != nil {
@@ -186,7 +201,7 @@ func (engine *Engine) collectRuntime(ctx context.Context, runtime plugin.Runtime
 				value := agentv1.AccessEvent{
 					SourceStreamID: streamID, SourceEventID: event.EventId,
 					PluginID: runtime.PluginID, ServiceID: event.ServiceId,
-					AuthorizationID: event.AuthorizationId, SourceIP: event.SourceIp, Destination: event.Destination,
+					AuthorizationID: event.AuthorizationId, SourceIP: event.SourceIp, Destination: event.Destination, ObservationKind: event.ObservationKind,
 					DestinationPort: event.DestinationPort, Network: event.Network, Protocol: event.Protocol, Action: event.Action,
 				}
 				sink := engine.eventSink()
